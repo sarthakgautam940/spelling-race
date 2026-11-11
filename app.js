@@ -2,23 +2,13 @@
   'use strict';
 
   const ROOM = '91409';
-  const HOST_ID = 'spellrace-room-' + ROOM + '-v2';
   const MAX = 8;
   const COUNT_MS = 3000, RESULT_MS = 3800, NOWIN_MS = 3000;
   const E = window.Engine;
   const $ = (id) => document.getElementById(id);
+  const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
   const qs = new URLSearchParams(location.search);
-  const ICE = [
-    { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:global.stun.twilio.com:3478' },
-    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
-    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turns:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' }
-  ];
-  const peerOpts = { debug: 0, config: { iceServers: ICE, sdpSemantics: 'unified-plan', iceCandidatePoolSize: 2 } };
-  if (qs.get('peer')) { // local testing hook
-    const [h, p] = qs.get('peer').split(':');
-    Object.assign(peerOpts, { host: h, port: +p, path: '/', secure: false, config: { iceServers: [] } });
-  }
+  const brokers = qs.get('broker') ? qs.get('broker').split(',') : BROKERS; // ?broker=ws://localhost:8883 for testing
 
   /* ---------- small helpers ---------- */
   const store = {
@@ -30,10 +20,7 @@
   const rand = (n) => Math.floor(Math.random() * n);
   const loadScript = (src) => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.async = true; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
   let depsP = null;
-  const ensureDeps = () => depsP || (depsP = Promise.all([
-    window.Peer ? 0 : loadScript('vendor/peerjs.min.js'),
-    window.WORDS ? 0 : loadScript('words.js')
-  ]).catch((e) => { depsP = null; throw e; }));
+  const ensureDeps = () => depsP || (depsP = (window.WORDS ? Promise.resolve() : loadScript('words.js')).catch((e) => { depsP = null; throw e; }));
 
   /* ---------- sound ---------- */
   const Snd = {
@@ -92,16 +79,17 @@
     show('v-room'); setBanner('Connecting', false); render();
     try { await ensureDeps(); } catch (_) { setBanner('Could not load the game files. Check your connection and reload.', true); return; }
     net = window.Net({
-      hostId: HOST_ID, name, peerOpts, max: MAX, debug: !!qs.get('debug'),
+      room: ROOM, name, brokers, max: MAX, debug: !!qs.get('debug'),
       on: {
-        status(s, attempt) {
+        status(s) {
           if (s === 'online') setBanner('', false);
-          else if (s === 'offline') setBanner('Cannot reach the matchmaking server. Retrying', true);
-          else if (!role) setBanner(attempt >= 3 ? 'Still looking for the room. If this keeps going, refresh both pages.' : 'Connecting', false);
+          else if (s === 'offline') setBanner('Cannot reach the game relay. Check your connection, still trying', true);
+          else if (!role) setBanner('Connecting', false);
         },
         role(r) { role = r; if (r === 'host') initHost(); },
         welcome(m) { if (m.name) me = m.name; },
         hello: onHello,
+        rejoined() { if (role === 'host' && S) bump(); },
         msg: onMsg,
         guestLeft: onGuestLeft,
         hostLost() { lastState = S; S = null; R = null; role = null; setBanner('Host left. Reconnecting', false); render(); },
@@ -113,9 +101,11 @@
       }
     });
     net.start();
+    if (qs.get('debug')) window.__sr = { net, crash: () => net.crash() };
   }
 
   function leave() {
+    if (A && A.syncStop) A.syncStop();
     if (net) { net.stop(); net = null; }
     S = null; R = null; A = null; role = null; lastState = null;
     try { speechSynthesis.cancel(); } catch (_) {}
@@ -128,12 +118,14 @@
 
   /* ---------- host: lobby ---------- */
   function initHost() {
+    if (A && A.syncStop) A.syncStop();
     A = { answer: null, attempts: {}, live: {}, used: new Set(), t: {}, idle: 0, wordSet: null };
     if (lastState) {
       S = lastState; lastState = null;
       S.phase = 'wait'; S.round = null; S.result = null; S.pauseNext = false; S.pausedWhy = null;
       for (const k of S.order) { S.players[k].connected = false; S.players[k].ready = false; }
     } else S = newState();
+    A.syncStop = T.every(4000, () => { if (role === 'host' && S && net) net.sendAll({ t: 'state', s: S }); }); // heals any dropped message
     addPlayer(me);
     maybeLobby(); setBanner('', false); bump();
   }
@@ -405,13 +397,24 @@
     }
   });
 
+  let lastProg = 0, progT = 0;
   function sendProg(final) {
     if (!R || R.spectator) return;
-    const p = final ? 1 : R.mode === 'copy' ? commonPrefix(R.typed, R.shown) / R.len : Math.min(1, R.typed.length / R.len);
-    const m = { t: 'prog', n: R.n, p, k: R.keys, e: R.errs, l: R.errLetters };
-    progs[me] = p; paintProgs();
-    if (role === 'host') { recordLive(me, m); net.sendAll({ t: 'prog', who: me, n: R.n, p }); }
-    else if (net) net.send(m);
+    progs[me] = progressNow(final); paintProgs();
+    const out = () => {
+      progT = 0; if (!R) return;
+      lastProg = performance.now();
+      const m = { t: 'prog', n: R.n, p: progressNow(final), k: R.keys, e: R.errs, l: R.errLetters };
+      if (role === 'host') { recordLive(me, m); if (net) net.sendAll({ t: 'prog', who: me, n: R.n, p: m.p }); }
+      else if (net) net.send(m);
+    };
+    if (final) { clearTimeout(progT); out(); return; }
+    const dt = performance.now() - lastProg;
+    if (dt >= 90) out(); else if (!progT) progT = setTimeout(out, 90 - dt); // keep message rates low on a shared relay
+  }
+  function progressNow(final) {
+    if (final) return 1;
+    return R.mode === 'copy' ? commonPrefix(R.typed, R.shown) / R.len : Math.min(1, R.typed.length / R.len);
   }
   function commonPrefix(a, b) { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; return i; }
 

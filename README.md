@@ -3,7 +3,7 @@
 A private spelling race for 2 to 8 players. Static site, no backend, no build step.
 
 Open the site, tap Join private room, enter the code (91409), type a name.
-The first person in is the referee and everyone else connects straight to them over WebRTC.
+The first person in is the referee and everyone else sends to them through the relay.
 The leaderboard ranks players by round wins, then accuracy, then average time.
 Players can join mid game (they sit out the current round). If the referee leaves, another player takes over and the scores carry on.
 
@@ -13,9 +13,11 @@ Players can join mid game (they sit out the current round). If the referee leave
 - Hear: the word is spoken. Spell it. One try per round.
 
 ## How connecting works
-- There are 6 host slots. A player claims the first free slot and becomes the referee, or joins whoever holds it.
-- If a slot answers nothing (a ghost left by a connection that died without closing, which the public broker keeps for about 100 seconds) it is skipped, so nobody is locked out.
-- Add `?debug=1` to the URL to log what the connection layer is doing in the browser console.
+- Players talk through public MQTT brokers over secure WebSockets (port 8084/8884/8081), so there are no NAT or relay problems. WebRTC was dropped because the free TURN servers it relied on no longer exist.
+- Three brokers are used at once and every message goes to all of them (duplicates are ignored), so one broker being down does not matter. The list is `BROKERS` in `app.js`.
+- The earliest present player is the host and referee. Each player's presence is a retained message with a last will, so the broker removes dead players automatically and the next in line takes over.
+- A host that never answers is ignored after 8 seconds, so a ghost cannot lock the room.
+- Add `?debug=1` to the URL to log what the connection layer is doing. `?broker=ws://localhost:8883` points it at your own broker.
 
 ## How timing stays fair
 - Both browsers sync clocks with repeated pings and keep the lowest round trip sample.
@@ -31,5 +33,5 @@ npm start
 ## Deploy
 Import the repo in Vercel. No settings are needed.
 
-Signaling uses the free public PeerJS broker (0.peerjs.com). Words come from `words.js`
+The public brokers are free shared test servers. Words come from `words.js`
 (about 7,300 words by frequency plus about 560 commonly misspelled words).
