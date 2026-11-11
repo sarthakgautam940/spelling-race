@@ -1,10 +1,11 @@
 # Spelling Race
 
-A private 1v1 spelling race. Static site, no backend, no build step.
+A private spelling race for 2 to 8 players. Static site, no backend, no build step.
 
 Open the site, tap Join private room, enter the code (91409), type a name.
-The first person in is the referee and the second connects straight to them over WebRTC.
-If the referee leaves, the other player takes over and the scores carry on.
+The first person in is the referee and everyone else connects straight to them over WebRTC.
+The leaderboard ranks players by round wins, then accuracy, then average time.
+Players can join mid game (they sit out the current round). If the referee leaves, another player takes over and the scores carry on.
 
 ## Modes
 - Copy: type the word as fast as you can. Every wrong key costs time.

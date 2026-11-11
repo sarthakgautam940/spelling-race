@@ -3,6 +3,7 @@
 
   const ROOM = '91409';
   const HOST_ID = 'spellrace-room-' + ROOM + '-v1';
+  const MAX = 8;
   const COUNT_MS = 3000, RESULT_MS = 3800, NOWIN_MS = 3000;
   const E = window.Engine;
   const $ = (id) => document.getElementById(id);
@@ -49,13 +50,12 @@
 
   /* ---------- state ---------- */
   let net = null, me = '', role = null, S = null, A = null, R = null, lastState = null;
-  let inRoom = false, lastResultN = 0, banner = '', resetArm = 0, oppProg = 0;
+  let inRoom = false, lastResultN = 0, banner = '', resetArm = 0, progs = {};
   const T = window.Timers;
 
   const newState = () => ({ v: 0, phase: 'wait', settings: { mode: 'copy', level: 'ramp' }, players: {}, order: [], round: null, result: null, history: [], pauseNext: false, pausedWhy: null, roundN: 0, rampN: 0 });
   const newPlayer = (name) => ({ name, wins: 0, streak: 0, bestStreak: 0, connected: true, ready: false, rounds: 0, correct: 0, precSum: 0, precN: 0, msSum: 0, bestMs: null, chars: 0, letters: {} });
-  const guestName = () => (S ? S.order.find((k) => k !== me) : null);
-
+  
   /* ---------- views ---------- */
   const views = ['v-home', 'v-code', 'v-name', 'v-room'];
   function show(id) { views.forEach((v) => $(v).classList.toggle('hidden', v !== id)); inRoom = id === 'v-room'; window.scrollTo(0, 0); }
@@ -82,11 +82,11 @@
 
   /* ---------- connect ---------- */
   async function startRoom(name) {
-    me = name; role = null; S = null; R = null; lastState = null; lastResultN = 0; oppProg = 0; curPane = '';
+    me = name; role = null; S = null; R = null; lastState = null; lastResultN = 0; progs = {}; curPane = '';
     show('v-room'); setBanner('Connecting', false); render();
     try { await ensureDeps(); } catch (_) { setBanner('Could not load the game files. Check your connection and reload.', true); return; }
     net = window.Net({
-      hostId: HOST_ID, name, peerOpts,
+      hostId: HOST_ID, name, peerOpts, max: MAX,
       on: {
         status(s) { if (s === 'connecting' && !role) setBanner('Connecting', false); else if (s === 'offline') setBanner('Cannot reach the matchmaking server. Retrying', true); else if (s === 'online') setBanner('', false); },
         role(r) { role = r; if (r === 'host') initHost(); },
@@ -151,7 +151,7 @@
       if (S.players[key].connected) return accept(false, 'name');
       S.players[key].connected = true; S.players[key].ready = false;
       accept(true, null, { name: key });
-    } else if (S.order.length < 2) {
+    } else if (S.order.length < MAX) {
       addPlayer(name); accept(true, null, { name });
     } else {
       const stale = S.order.find((k) => !S.players[k].connected);
@@ -161,21 +161,30 @@
     }
     maybeLobby(); bump();
   }
-  function onGuestLeft() {
-    if (!S) return;
-    const g = guestName();
-    if (g && S.players[g]) { S.players[g].connected = false; S.players[g].ready = false; }
-    oppProg = 0; maybeLobby(); bump();
+  function onGuestLeft(name) {
+    if (!S || !S.players[name]) return;
+    S.players[name].connected = false; S.players[name].ready = false;
+    delete progs[name];
+    maybeLobby();
+    if (S.phase === 'round') checkAllIn();
+    else if (S.phase === 'ready' && S.order.every((k) => !S.players[k].connected || S.players[k].ready)) startRound();
+    if (S) bump();
   }
 
   /* ---------- message routing ---------- */
-  function onMsg(m) {
+  function onMsg(m, from) {
     if (role === 'host') {
-      if (m.t === 'prog') { recordLive(guestName(), m); if (R && m.n === R.n) { oppProg = m.p || 0; paintOppProg(); } return; }
-      hostHandle(guestName(), m);
+      if (!from) return;
+      if (m.t === 'prog') {
+        recordLive(from, m);
+        if (R && m.n === R.n) { progs[from] = m.p || 0; paintProgs(); }
+        net.sendAll({ t: 'prog', who: from, n: m.n, p: m.p || 0 }, from);
+        return;
+      }
+      hostHandle(from, m);
     } else {
       if (m.t === 'state') { S = m.s; applyState(); }
-      else if (m.t === 'prog') { if (R && m.n === R.n) { oppProg = m.p || 0; paintOppProg(); } }
+      else if (m.t === 'prog') { if (R && m.n === R.n && m.who) { progs[m.who] = m.p || 0; paintProgs(); } }
     }
   }
   function act(m) { if (role === 'host') hostHandle(me, m); else if (net) net.send(m); }
@@ -187,7 +196,7 @@
       case 'ready':
         if (S.phase !== 'ready') return;
         p.ready = !!m.v;
-        if (S.order.every((k) => S.players[k].ready && S.players[k].connected)) startRound(); else bump();
+        if (connCount() >= 2 && S.order.every((k) => !S.players[k].connected || S.players[k].ready)) startRound(); else bump();
         break;
       case 'set':
         if (m.k === 'mode' && ['copy', 'fix', 'hear'].includes(m.v)) S.settings.mode = m.v;
@@ -203,7 +212,7 @@
       case 'reset':
         clearTimers();
         S.order.forEach((k) => { const c = S.players[k].connected; S.players[k] = newPlayer(k); S.players[k].connected = c; });
-        S.history = []; S.rampN = 0; S.round = null; S.result = null; S.pauseNext = false; S.pausedWhy = null; S.phase = 'wait'; A.used.clear(); A.idle = 0;
+        S.history = []; S.rampN = 0; S.round = null; S.result = null; S.pauseNext = false; S.pausedWhy = null; S.phase = 'wait'; A.used.clear(); A.idle = 0; progs = {};
         maybeLobby(); R = null; bump(); break;
       case 'sub': onSub(from, m); break;
     }
@@ -242,7 +251,7 @@
     const len = word.length;
     const limit = Math.min(30000, 9000 + len * 1200 + (mode === 'copy' ? 0 : 3000));
     A.answer = word; A.attempts = {}; A.live = {};
-    S.round = { n: S.roundN, mode, shown: mode === 'hear' ? null : shown, len, say: mode === 'hear' ? word : null, startAt: net.hostNow() + COUNT_MS, limit, locked: [] };
+    S.round = { n: S.roundN, mode, shown: mode === 'hear' ? null : shown, len, say: mode === 'hear' ? word : null, startAt: net.hostNow() + COUNT_MS, limit, locked: [], in: S.order.filter((k) => S.players[k].connected) };
     S.result = null; S.phase = 'round'; S.pausedWhy = null;
     S.order.forEach((k) => (S.players[k].ready = false));
     A.t.end = T.after(COUNT_MS + limit, finish);
@@ -254,38 +263,37 @@
     A.live[name] = { k: m.k | 0, e: m.e | 0, l: String(m.l || '').slice(0, 60), p: m.p || 0 };
   }
 
+  const roundPlayers = () => S.round.in.filter((k) => S.players[k] && S.players[k].connected);
+  function checkAllIn() {
+    const inn = roundPlayers();
+    if (!inn.length || inn.every((k) => A.attempts[k])) finish();
+  }
+  function graceMs() { const rtt = net.maxPeerRtt() || 60; return Math.min(220, Math.max(45, rtt / 2 + 45)); }
+
   function onSub(name, m) {
-    if (S.phase !== 'round' || !S.round || m.n !== S.round.n || A.attempts[name]) return;
+    if (S.phase !== 'round' || !S.round || m.n !== S.round.n || A.attempts[name] || !S.round.in.includes(name)) return;
     const text = String(m.text || '').toLowerCase().replace(/[^a-z]/g, '').slice(0, 40);
     const ms = Math.max(0, Number(m.ms) || 0);
     const ok = text === A.answer;
     A.attempts[name] = { text, ms, ok, keys: m.keys | 0, errs: m.errs | 0, el: String(m.el || '').slice(0, 60), at: performance.now() };
-    const other = S.order.find((k) => k !== name);
-    const oa = other && A.attempts[other];
     if (!ok) S.round.locked.push(name);
-    if (ok) {
-      if (oa) { finish(); return; }
-      if (S.players[other] && !S.players[other].connected) { finish(); return; }
-      if (!A.t.grace) {
-        const rtt = net.peerRtt || 60;
-        const g = name === me ? Math.min(220, Math.max(45, rtt / 2 + 45)) : 30; // wait for a possibly faster answer still in flight
-        A.t.grace = T.after(g, finish);
-      }
-    } else if (oa) finish(); else bump();
+    if (roundPlayers().every((k) => A.attempts[k])) { finish(); return; }
+    if (ok) { if (!A.t.grace) A.t.grace = T.after(graceMs(), finish); } // wait for a possibly faster answer still in flight
+    else bump();
   }
 
   function finish() {
     if (!S || S.phase !== 'round') return;
     clearTimers();
     const r = S.round, answer = A.answer, mode = r.mode;
-    const oks = Object.entries(A.attempts).filter(([, a]) => a.ok).sort((a, b) => a[1].ms - b[1].ms || a[1].at - b[1].at);
-    const winner = oks.length ? oks[0][0] : null;
-    const margin = oks.length > 1 ? oks[1][1].ms - oks[0][1].ms : null;
-    const res = { n: r.n, answer, mode, shown: mode === 'fix' ? r.shown : null, winner, margin, per: {} };
+    const inn = roundPlayers();
+    const oks = inn.filter((k) => A.attempts[k] && A.attempts[k].ok).sort((a, b) => A.attempts[a].ms - A.attempts[b].ms || A.attempts[a].at - A.attempts[b].at);
+    const winner = oks.length ? oks[0] : null;
+    const margin = oks.length > 1 ? A.attempts[oks[1]].ms - A.attempts[oks[0]].ms : null;
+    const res = { n: r.n, answer, mode, shown: mode === 'fix' ? r.shown : null, winner, margin, per: {}, rank: [] };
     let anyKeys = false;
-    for (const name of S.order) {
+    for (const name of inn) {
       const p = S.players[name], a = A.attempts[name], lv = A.live[name];
-      if (!p.connected) continue;
       p.rounds++;
       let prec = null, ops = null, notes = [];
       if (mode === 'copy') {
@@ -301,6 +309,8 @@
       if (name === winner) { p.wins++; p.streak++; p.bestStreak = Math.max(p.bestStreak, p.streak); } else p.streak = 0;
       res.per[name] = { ok: !!(a && a.ok), ms: a ? a.ms : null, text: a ? a.text : null, prec, ops, notes };
     }
+    const tier = (k) => (res.per[k].ok ? 0 : res.per[k].text != null ? 1 : 2);
+    res.rank = inn.slice().sort((a, b) => tier(a) - tier(b) || (res.per[a].ms || 0) - (res.per[b].ms || 0));
     A.idle = anyKeys ? 0 : A.idle + 1;
     S.history.push(winner || '-'); if (S.history.length > 14) S.history.shift();
     S.result = res; S.phase = 'result';
@@ -320,7 +330,7 @@
 
   function bump() {
     S.v++;
-    if (net && net.hasGuest()) net.send({ t: 'state', s: S });
+    if (net && role === 'host') net.sendAll({ t: 'state', s: S });
     applyState();
   }
 
@@ -335,11 +345,12 @@
 
   function setupRound(r) {
     const startLocal = net.toLocal(r.startAt);
-    R = { n: r.n, mode: r.mode, shown: r.shown, len: r.len, say: r.say, startLocal, limit: r.limit, typed: '', keys: 0, errs: 0, errLetters: '', done: false, locked: false, started: false, lastN: -1, ms: null };
-    oppProg = 0;
+    const spec = !r.in.includes(me);
+    R = { n: r.n, mode: r.mode, shown: r.shown, len: r.len, say: r.say, startHost: r.startAt, startLocal, limit: r.limit, typed: '', keys: 0, errs: 0, errLetters: '', done: spec, spectator: spec, locked: false, started: false, lastN: -1, ms: null };
+    progs = {};
     const t = $('typer'); t.value = ''; t.readOnly = true; t.className = 'typer';
     $('liveNote').textContent = ''; $('liveNote').className = 'note';
-    paintOppProg();
+    paintProgs();
   }
 
   function onResult() {
@@ -384,12 +395,13 @@
     }
   });
 
-  function sendProg() {
-    if (!R) return;
-    const p = R.mode === 'copy' ? (R.shown.startsWith(R.typed) ? R.typed.length / R.len : commonPrefix(R.typed, R.shown) / R.len) : Math.min(1, R.typed.length / R.len);
+  function sendProg(final) {
+    if (!R || R.spectator) return;
+    const p = final ? 1 : R.mode === 'copy' ? commonPrefix(R.typed, R.shown) / R.len : Math.min(1, R.typed.length / R.len);
     const m = { t: 'prog', n: R.n, p, k: R.keys, e: R.errs, l: R.errLetters };
-    if (role === 'host') recordLive(me, m);
-    if (net) net.send(m);
+    progs[me] = p; paintProgs();
+    if (role === 'host') { recordLive(me, m); net.sendAll({ t: 'prog', who: me, n: R.n, p }); }
+    else if (net) net.send(m);
   }
   function commonPrefix(a, b) { let i = 0; while (i < a.length && i < b.length && a[i] === b[i]) i++; return i; }
 
@@ -399,10 +411,9 @@
     if (R.mode === 'copy') { typer.classList.remove('wrong'); typer.classList.add('good'); $('liveNote').textContent = 'Done in ' + fmt(R.ms); $('liveNote').className = 'note green'; Snd.done(); }
     else { $('liveNote').textContent = 'Locked in. Waiting for the result'; $('liveNote').className = 'note'; Snd.done(); }
     const m = { t: 'sub', n: R.n, text: R.typed, ms: R.ms, keys: R.keys, errs: R.errs, el: R.errLetters };
-    sendProgFinal();
+    sendProg(true);
     act(m);
   }
-  function sendProgFinal() { if (net) net.send({ t: 'prog', n: R.n, p: 1, k: R.keys, e: R.errs, l: R.errLetters }); }
 
   /* ---------- rendering ---------- */
   const prompt = $('prompt');
@@ -416,9 +427,11 @@
     }
     prompt.innerHTML = html;
   }
-  function paintOppProg() {
-    const g = $('card1'), prog = g.querySelector('.prog');
-    if (prog) prog.style.width = Math.round(Math.min(1, oppProg) * 100) + '%';
+  function paintProgs() {
+    document.querySelectorAll('#board .prow').forEach((row) => {
+      const bar = row.querySelector('.prog');
+      if (bar) bar.style.width = Math.round(Math.min(1, progs[row.dataset.name] || 0) * 100) + '%';
+    });
   }
 
   function enterLive() {
@@ -429,11 +442,12 @@
     prm.className = 'prompt'; hear.classList.toggle('hidden', R.mode !== 'hear');
     if (R.mode === 'copy') { paintCopy(); hint.textContent = 'Type the word.'; }
     else if (R.mode === 'fix') { prm.classList.add('fix'); prm.textContent = R.shown; hint.textContent = 'This is misspelled. Type it correctly and press Enter. One try.'; }
-    else { prm.classList.add('hear'); prm.textContent = Array(R.len).fill('_').join(' '); hint.textContent = R.len + ' letters. Spell it and press Enter. One try.'; speak(R.say); }
+    else { prm.classList.add('hear'); prm.textContent = Array(R.len).fill('_').join(' '); hint.textContent = R.len + ' letters. Spell it and press Enter. One try.'; if (!R.spectator) speak(R.say); }
     $('liveNote').textContent = ''; $('liveNote').className = 'note';
     if (R.locked) lockedNote();
+    if (R.spectator) { typer.readOnly = true; $('liveNote').textContent = 'You joined mid round. You are in from the next one.'; }
     Snd.go();
-    if (!R.locked) typer.focus({ preventScroll: true });
+    if (!R.locked && !R.spectator) typer.focus({ preventScroll: true });
   }
   function lockedNote() { typer.readOnly = true; $('liveNote').textContent = 'Not quite. You are out this round.'; $('liveNote').className = 'note red'; }
   $('hearBtn').onclick = () => { if (R && R.say) speak(R.say); typer.focus({ preventScroll: true }); };
@@ -444,6 +458,7 @@
   function frame() {
     requestAnimationFrame(frame);
     if (!inRoom || !S || !R || S.phase !== 'round') return;
+    if (!R.started && net) R.startLocal = net.toLocal(R.startHost); // re-derive until the clock sync settles, then it freezes at start
     const t = performance.now(), toStart = R.startLocal - t;
     if (toStart > 0) {
       pane('st-count');
@@ -463,44 +478,50 @@
   }
   requestAnimationFrame(frame);
 
-  function cardInto(node, name, isMe) {
-    node.className = 'card'; node.textContent = '';
-    const p = name && S ? S.players[name] : null;
-    if (!p) {
-      node.classList.add('empty');
-      node.append(el('div', 'card-top', null)); node.firstChild.append(el('div', 'pname', 'Waiting'));
-      node.append(el('div', 'wins', '0'));
-      return;
-    }
-    const top = el('div', 'card-top');
-    const nm = el('div', 'pname', p.name); if (isMe) nm.append(el('span', 'you', ' (you)'));
-    top.append(nm);
-    const locked = S.phase === 'round' && S.round && S.round.locked.includes(name);
-    if (!p.connected) top.append(el('span', 'tag', 'Away'));
-    else if (locked) top.append(el('span', 'tag out', 'Out'));
-    else if (S.phase === 'ready' && p.ready) top.append(el('span', 'tag ready', 'Ready'));
-    node.append(top, el('div', 'wins', String(p.wins)));
-    const st = el('div', 'stats');
-    const acc = p.precN ? Math.round((p.precSum / p.precN) * 100) + '%' : 'none';
-    const avg = p.correct ? fmt(p.msSum / p.correct) : 'none';
-    const mk = (k, v) => { const s = el('span', null, k + ' '); s.append(el('b', null, v)); return s; };
-    st.append(mk('Accuracy', acc), mk('Avg', avg), mk('Best', p.bestMs != null ? fmt(p.bestMs) : 'none'));
-    node.append(st);
-    if (p.streak >= 2) node.append(el('span', 'streak', p.streak + ' in a row'));
-    const top2 = Object.entries(p.letters).filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([l]) => l);
-    if (top2.length) node.append(el('div', 'trips', 'Trips on ' + top2.join(', ')));
-    if (S.phase === 'result' && S.result) {
-      if (S.result.winner === name) node.classList.add('win'); else if (S.result.winner) node.classList.add('lose');
-    }
-    if (!isMe) node.append(el('div', 'prog'));
+  function renderBoard() {
+    const board = $('board'); board.textContent = '';
+    if (!S) return;
+    const list = E.rank(S.order.map((k) => S.players[k]));
+    list.forEach((p, i) => {
+      const name = p.name, isMe = name === me;
+      const row = el('div', 'prow'); row.dataset.name = name;
+      if (isMe) row.classList.add('me');
+      if (!p.connected) row.classList.add('away');
+      row.append(el('div', 'rank r' + (i + 1), String(i + 1)));
+      const main = el('div', 'pmain');
+      const top = el('div', 'card-top');
+      const nm = el('div', 'pname', p.name); if (isMe) nm.append(el('span', 'you', ' (you)'));
+      top.append(nm);
+      const inRound = S.phase === 'round' && S.round && S.round.in.includes(name);
+      const locked = inRound && S.round.locked.includes(name);
+      if (!p.connected) top.append(el('span', 'tag', 'Away'));
+      else if (S.phase === 'round' && S.round && !inRound) top.append(el('span', 'tag', 'Next round'));
+      else if (locked) top.append(el('span', 'tag out', 'Out'));
+      else if (S.phase === 'ready' && p.ready) top.append(el('span', 'tag ready', 'Ready'));
+      if (p.streak >= 2) top.append(el('span', 'streak', p.streak + ' in a row'));
+      main.append(top);
+      const st = el('div', 'stats');
+      const mk = (k, v) => { const s = el('span', null, k + ' '); s.append(el('b', null, v)); return s; };
+      st.append(mk('Accuracy', p.precN ? Math.round((p.precSum / p.precN) * 100) + '%' : 'none'), mk('Avg', p.correct ? fmt(p.msSum / p.correct) : 'none'), mk('Best', p.bestMs != null ? fmt(p.bestMs) : 'none'));
+      main.append(st);
+      const trips = Object.entries(p.letters).filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([l]) => l);
+      if (trips.length) main.append(el('div', 'trips', 'Trips on ' + trips.join(', ')));
+      row.append(main, el('div', 'wins', String(p.wins)), el('div', 'prog'));
+      if (S.phase === 'result' && S.result && S.result.per[name]) {
+        if (S.result.winner === name) row.classList.add('win');
+      }
+      board.append(row);
+    });
+    paintProgs();
   }
 
   function renderNet() {
     const dot = $('net').querySelector('.dot'), txt = $('netTxt');
-    const rtt = role === 'host' ? (net && net.hasGuest() ? net.peerRtt : null) : (net ? net.rtt : null);
+    const host = role === 'host';
+    const rtt = host ? (net ? net.maxPeerRtt() : null) : (net ? net.rtt : null);
     dot.className = 'dot';
     if (!role) { txt.textContent = 'connecting'; return; }
-    if (rtt == null) { txt.textContent = role === 'host' && !(net && net.hasGuest()) ? 'online' : 'syncing'; if (role === 'host') dot.classList.add('good'); return; }
+    if (rtt == null) { txt.textContent = host ? 'online' : 'syncing'; if (host) dot.classList.add('good'); return; }
     const ms = Math.round(rtt);
     txt.textContent = ms + ' ms';
     dot.classList.add(ms < 60 ? 'good' : ms < 120 ? 'ok' : ms < 220 ? 'slow' : 'bad');
@@ -516,18 +537,18 @@
     renderNet();
     $('soundBtn').textContent = Snd.on ? 'Sound on' : 'Sound off';
     $('soundBtn').setAttribute('aria-pressed', String(Snd.on));
-    if (!S) { cardInto($('card0'), null, true); cardInto($('card1'), null, false); pane('st-wait'); $('waitTitle').textContent = 'Connecting'; $('waitSub').textContent = 'Finding the room.'; return; }
-    const opp = guestName();
-    cardInto($('card0'), me, true); cardInto($('card1'), opp, false);
-    paintOppProg();
+    if (!S) { $('board').textContent = ''; pane('st-wait'); $('waitTitle').textContent = 'Connecting'; $('waitSub').textContent = 'Finding the room.'; return; }
+    if (S.phase !== 'round') progs = {};
+    renderBoard();
 
     // stage
     const ph = S.phase;
-    if (ph === 'wait') { pane('st-wait'); $('waitTitle').textContent = 'Waiting for your friend'; $('waitSub').textContent = 'They open the site, tap Join private room, and enter code ' + ROOM + '.'; }
+    if (ph === 'wait') { pane('st-wait'); $('waitTitle').textContent = 'Waiting for friends'; $('waitSub').textContent = 'Up to ' + MAX + ' can play. Everyone opens the site, taps Join private room, and enters code ' + ROOM + '.'; }
     else if (ph === 'ready') {
       pane('st-ready');
       const mine = S.players[me];
-      $('readyBtn').textContent = mine && mine.ready ? 'Waiting for ' + (opp || 'opponent') : 'Ready';
+      const waiting = S.order.filter((k) => S.players[k].connected && !S.players[k].ready);
+      $('readyBtn').textContent = mine && mine.ready ? 'Waiting for ' + waiting.join(', ') : 'Ready';
       $('readyBtn').classList.toggle('primary', !(mine && mine.ready));
     } else if (ph === 'round' && R) {
       if (performance.now() < R.startLocal) pane('st-count'); else if (R.started) pane('st-live');
@@ -562,18 +583,17 @@
     $('resWord').textContent = res.answer;
     let sub = '';
     if (res.mode === 'fix' && res.shown) sub = 'It was shown as ' + res.shown + '.';
-    if (res.winner && res.margin != null) sub = (res.winner === me ? 'You were' : res.winner + ' was') + ' ' + (res.margin / 1000).toFixed(3) + ' s faster. ' + sub;
+    if (res.winner && res.margin != null) sub = (res.winner === me ? 'You were' : res.winner + ' was') + ' ' + (res.margin / 1000).toFixed(3) + ' s ahead of second place. ' + sub;
     $('resSub').textContent = sub.trim();
     const rows = $('resRows'); rows.textContent = '';
-    const order = [me, ...S.order.filter((k) => k !== me)];
-    for (const name of order) {
-      const per = res.per[name]; if (!per && !S.players[name]) continue;
+    for (const name of res.rank) {
+      const per = res.per[name];
       const row = el('div', 'row' + (res.winner === name ? ' win' : ''));
       row.append(el('div', 'rn', name + (name === me ? ' (you)' : '')));
       const big = el('div', 'rt');
-      if (per && per.ok) big.textContent = fmt(per.ms); else if (per && per.text != null) { big.textContent = 'Wrong'; big.classList.add('bad'); } else { big.textContent = 'No answer'; big.classList.add('none'); }
+      if (per.ok) big.textContent = fmt(per.ms); else if (per.text != null) { big.textContent = 'Wrong'; big.classList.add('bad'); } else { big.textContent = 'No answer'; big.classList.add('none'); }
       row.append(big);
-      if (per && per.ops && per.ops.length) {
+      if (per.ops && per.ops.length) {
         const ty = el('div', 'typed');
         for (const o of per.ops) {
           if (o.k === 'ok') ty.append(el('span', 'ok', o.t));
@@ -584,7 +604,7 @@
         row.append(ty);
         if (per.notes && per.notes.length) row.append(el('div', 'rm', per.notes.join(', ')));
       }
-      if (per && per.prec != null) row.append(el('div', 'rm', Math.round(per.prec * 100) + '% accurate'));
+      if (per.prec != null) row.append(el('div', 'rm', Math.round(per.prec * 100) + '% accurate'));
       rows.append(row);
     }
     const nf = $('nextFill'); nf.style.transition = 'none'; nf.style.width = '0'; void nf.offsetWidth;

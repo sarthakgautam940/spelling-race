@@ -159,6 +159,14 @@
     'stake steak suite sweet tail tale taught taut tea tee team teem tear tier throne thrown tide tied toe tow vain vane vein waist waste ' +
     'wait weight war wore ware wear way weigh weak week wheel weal wood would yoke yolk yore your youre').split(' '));
 
-  const api = { distance, similarity, align, describe, troubleLetters, opCounts, misspell, levelWeights, HOMOPHONES };
+  /* Leaderboard order: most round wins, then accuracy, then faster average, then name. */
+  function rank(players) {
+    const acc = (p) => (p.precN ? p.precSum / p.precN : -1);
+    const avg = (p) => (p.correct ? p.msSum / p.correct : Infinity);
+    return players.slice().sort((a, b) =>
+      (b.wins - a.wins) || (acc(b) - acc(a)) || (avg(a) - avg(b)) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+
+  const api = { rank, distance, similarity, align, describe, troubleLetters, opCounts, misspell, levelWeights, HOMOPHONES };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Engine = api;
 })(typeof window !== 'undefined' ? window : globalThis);

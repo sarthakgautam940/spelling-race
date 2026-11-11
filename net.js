@@ -36,9 +36,10 @@
   })();
 
   function Net(cfg) {
-    const self = { role: null, rtt: null, off: 0, synced: false, peerRtt: null };
-    let peer = null, conn = null, guest = null, stopped = false, stopPing = null, lastSeen = 0, epoch = 0;
+    const self = { role: null, rtt: null, off: 0, synced: false };
+    let peer = null, conn = null, stopped = false, stopPing = null, lastSeen = 0, epoch = 0;
     const samples = [];
+    const guests = new Map(); // host side: connection -> { name, lastSeen, rtt }
     const emit = (k, ...a) => { if (cfg.on[k]) cfg.on[k](...a); };
 
     function mkPeer(id) {
@@ -54,9 +55,10 @@
     function teardown() {
       if (stopPing) { stopPing(); stopPing = null; }
       try { if (conn) conn.close(); } catch (_) {}
-      try { if (guest) guest.close(); } catch (_) {}
+      for (const c of guests.keys()) { try { c.close(); } catch (_) {} }
+      guests.clear();
       try { if (peer) peer.destroy(); } catch (_) {}
-      peer = conn = guest = null; self.role = null; self.synced = false; self.rtt = null; samples.length = 0;
+      peer = conn = null; self.role = null; self.synced = false; self.rtt = null; samples.length = 0;
     }
 
     async function run() {
@@ -80,34 +82,47 @@
       }
     }
 
+    function dropGuest(c, announce) {
+      const g = guests.get(c); if (!g) return;
+      guests.delete(c);
+      try { c.close(); } catch (_) {}
+      if (announce && g.name) emit('guestLeft', g.name);
+    }
+
     function becomeHost(p) {
       peer = p; self.role = 'host';
       p.on('disconnected', () => { if (!stopped && peer === p) { try { p.reconnect(); } catch (_) {} } });
       p.on('error', () => {});
       p.on('connection', (c) => {
-        if (guest) {
+        if (guests.size >= cfg.max - 1) {
           c.on('open', () => { try { c.send({ t: 'reject', why: 'full' }); } catch (_) {} setTimeout(() => { try { c.close(); } catch (_) {} }, 300); });
           return;
         }
-        guest = c; lastSeen = now();
+        const g = { name: null, lastSeen: now(), rtt: null };
+        guests.set(c, g);
         c.on('data', (m) => {
-          if (!m || typeof m !== 'object') return;
-          lastSeen = now();
-          if (m.t === 'ping') { self.peerRtt = m.rtt; try { c.send({ t: 'pong', c: m.c, h: now() }); } catch (_) {} emit('rtt', m.rtt); return; }
+          if (!m || typeof m !== 'object' || !guests.has(c)) return;
+          g.lastSeen = now();
+          if (m.t === 'ping') { g.rtt = m.rtt; try { c.send({ t: 'pong', c: m.c, h: now() }); } catch (_) {} emit('rtt'); return; }
           if (m.t === 'hello') {
+            // a reconnecting player whose old link went quiet should not be locked out by it
+            for (const [oc, og] of guests) {
+              if (oc !== c && og.name && String(m.name || '').toLowerCase() === og.name.toLowerCase() && now() - og.lastSeen > 3000) dropGuest(oc, true);
+            }
             emit('hello', m, (ok, why, extra) => {
               try { c.send(ok ? Object.assign({ t: 'welcome' }, extra || {}) : { t: 'reject', why }); } catch (_) {}
-              if (!ok) { if (guest === c) guest = null; setTimeout(() => { try { c.close(); } catch (_) {} }, 300); }
+              if (ok) g.name = extra && extra.name ? extra.name : m.name;
+              else { guests.delete(c); setTimeout(() => { try { c.close(); } catch (_) {} }, 300); }
             });
             return;
           }
-          emit('msg', m);
+          if (g.name) emit('msg', m, g.name);
         });
-        const gone = () => { if (guest === c) { guest = null; emit('guestLeft'); } };
+        const gone = () => dropGuest(c, true);
         c.on('close', gone); c.on('error', gone);
       });
       stopPing = Timers.every(1000, () => {
-        if (guest && now() - lastSeen > 9000) { const c = guest; guest = null; try { c.close(); } catch (_) {} emit('guestLeft'); }
+        for (const [c, g] of guests) if (now() - g.lastSeen > 9000) dropGuest(c, true);
       });
       emit('role', 'host'); emit('status', 'online');
     }
@@ -179,8 +194,10 @@
       emit('rtt', self.rtt);
     }
 
-    self.send = (m) => { const c = self.role === 'host' ? guest : conn; if (c && c.open) { try { c.send(m); } catch (_) {} } };
-    self.hasGuest = () => !!(guest && guest.open);
+    self.send = (m) => { if (conn && conn.open) { try { conn.send(m); } catch (_) {} } }; // guest to host
+    self.sendAll = (m, except) => { for (const [c, g] of guests) if (g.name && g.name !== except && c.open) { try { c.send(m); } catch (_) {} } };
+    self.guestCount = () => { let n = 0; for (const g of guests.values()) if (g.name) n++; return n; };
+    self.maxPeerRtt = () => { let r = null; for (const g of guests.values()) if (g.name && g.rtt != null && (r == null || g.rtt > r)) r = g.rtt; return r; };
     self.toLocal = (hostT) => (self.role === 'host' ? hostT : hostT - self.off);
     self.hostNow = () => (self.role === 'host' ? now() : now() + self.off);
     self.stop = () => { stopped = true; epoch++; teardown(); };

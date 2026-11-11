@@ -54,3 +54,15 @@ test('level weights sum to one and shift toward hard', () => {
   assert.ok(E.levelWeights('ramp', 30).hard > E.levelWeights('ramp', 1).hard);
   assert.deepStrictEqual(E.levelWeights('hard', 3), { easy: 0, medium: 0, hard: 1 });
 });
+
+test('rank orders by wins, then accuracy, then speed', () => {
+  const P = (name, wins, precSum, precN, msSum, correct) => ({ name, wins, precSum, precN, msSum, correct });
+  const out = E.rank([
+    P('c', 1, 1, 1, 900, 1),
+    P('a', 3, 2, 3, 3000, 3),
+    P('b', 1, 1, 1, 500, 1),
+    P('d', 1, 0.5, 1, 100, 1),
+    P('e', 0, 0, 0, 0, 0)
+  ]).map((p) => p.name);
+  assert.deepStrictEqual(out, ['a', 'b', 'c', 'd', 'e']);
+});
