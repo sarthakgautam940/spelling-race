@@ -2,13 +2,19 @@
   'use strict';
 
   const ROOM = '91409';
-  const HOST_ID = 'spellrace-room-' + ROOM + '-v1';
+  const HOST_ID = 'spellrace-room-' + ROOM + '-v2';
   const MAX = 8;
   const COUNT_MS = 3000, RESULT_MS = 3800, NOWIN_MS = 3000;
   const E = window.Engine;
   const $ = (id) => document.getElementById(id);
   const qs = new URLSearchParams(location.search);
-  const peerOpts = { debug: 0 };
+  const ICE = [
+    { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:global.stun.twilio.com:3478' },
+    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
+    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turns:openrelay.metered.ca:443?transport=tcp'], username: 'openrelayproject', credential: 'openrelayproject' }
+  ];
+  const peerOpts = { debug: 0, config: { iceServers: ICE, sdpSemantics: 'unified-plan', iceCandidatePoolSize: 2 } };
   if (qs.get('peer')) { // local testing hook
     const [h, p] = qs.get('peer').split(':');
     Object.assign(peerOpts, { host: h, port: +p, path: '/', secure: false, config: { iceServers: [] } });
@@ -86,9 +92,13 @@
     show('v-room'); setBanner('Connecting', false); render();
     try { await ensureDeps(); } catch (_) { setBanner('Could not load the game files. Check your connection and reload.', true); return; }
     net = window.Net({
-      hostId: HOST_ID, name, peerOpts, max: MAX,
+      hostId: HOST_ID, name, peerOpts, max: MAX, debug: !!qs.get('debug'),
       on: {
-        status(s) { if (s === 'connecting' && !role) setBanner('Connecting', false); else if (s === 'offline') setBanner('Cannot reach the matchmaking server. Retrying', true); else if (s === 'online') setBanner('', false); },
+        status(s, attempt) {
+          if (s === 'online') setBanner('', false);
+          else if (s === 'offline') setBanner('Cannot reach the matchmaking server. Retrying', true);
+          else if (!role) setBanner(attempt >= 3 ? 'Still looking for the room. If this keeps going, refresh both pages.' : 'Connecting', false);
+        },
         role(r) { role = r; if (r === 'host') initHost(); },
         welcome(m) { if (m.name) me = m.name; },
         hello: onHello,

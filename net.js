@@ -35,12 +35,15 @@
     };
   })();
 
+  const ghosts = new Map(); // slot -> when it last stayed silent
+
   function Net(cfg) {
     const self = { role: null, rtt: null, off: 0, synced: false };
     let peer = null, conn = null, stopped = false, stopPing = null, lastSeen = 0, epoch = 0;
     const samples = [];
     const guests = new Map(); // host side: connection -> { name, lastSeen, rtt }
     const emit = (k, ...a) => { if (cfg.on[k]) cfg.on[k](...a); };
+    const dbg = (...a) => { if (cfg.debug) console.log('[net ' + Math.round(now()) + ']', ...a); };
 
     function mkPeer(id) {
       return new Promise((res, rej) => {
@@ -61,25 +64,81 @@
       peer = conn = null; self.role = null; self.synced = false; self.rtt = null; samples.length = 0;
     }
 
+    const SLOTS = cfg.slots || 6;
+    const slotId = (i) => cfg.hostId + '-s' + i;
+    const isGhost = (i) => ghosts.has(i) && now() - ghosts.get(i) < 90000;
+
+    /* Try to join the host registered on slot i. Resolves joined, rejected, free (slot vanished) or ghost (silent). */
+    function joinSlot(p, i, timeout) {
+      return new Promise((resolve) => {
+        let settled = false;
+        const c = p.connect(slotId(i), { reliable: true, serialization: 'json' });
+        const onErr = (e) => { if (e && e.type === 'peer-unavailable' && String(e.message || '').endsWith(slotId(i))) fin('free'); };
+        const fin = (r) => { if (settled) return; settled = true; clearTimeout(to); p.off('error', onErr); resolve(r); };
+        const to = setTimeout(() => { try { c.close(); } catch (_) {} fin('ghost'); }, timeout);
+        p.on('error', onErr);
+        c.on('open', () => { try { c.send({ t: 'hello', name: cfg.name }); } catch (_) {} });
+        c.on('data', (m) => {
+          if (settled || !m || typeof m !== 'object') return;
+          if (m.t === 'welcome') {
+            fin('joined');
+            c.on('data', (d) => {
+              if (!d || typeof d !== 'object') return;
+              lastSeen = now();
+              if (d.t === 'pong') { onPong(d); return; }
+              emit('msg', d);
+            });
+            c.on('close', () => hostLost(c)); c.on('error', () => hostLost(c));
+            peer = p; conn = c; self.role = 'guest'; self.slot = i; lastSeen = now();
+            dbg('joined host on slot', i);
+            startGuestPings();
+            emit('welcome', m); emit('role', 'guest'); emit('status', 'online');
+          } else if (m.t === 'reject') { try { c.close(); } catch (_) {} fin('rejected'); emit('rejected', m.why); }
+        });
+        const bad = () => fin('ghost');
+        c.on('close', bad); c.on('error', bad);
+      });
+    }
+
+    /* Slots are claimed in order. A taken slot is either a live host (it answers) or a ghost left behind by a
+       connection that died without closing (it stays silent and is skipped for a while). */
     async function run() {
       const my = ++epoch;
-      let attempt = 0;
-      while (!stopped && my === epoch) {
-        emit('status', 'connecting');
-        let p = null;
-        try { p = await mkPeer(cfg.hostId); }
-        catch (e) {
-          if (!e || e.type !== 'unavailable-id') {
-            emit('status', 'offline');
-            await sleep(Math.min(4000, 900 + attempt * 600)); attempt++; continue;
+      let attempt = 0, gp = null;
+      const closeGp = () => { try { if (gp) gp.destroy(); } catch (_) {} gp = null; };
+      const alive = () => !stopped && my === epoch;
+      while (alive()) {
+        emit('status', 'looking', attempt); dbg('looking, attempt', attempt);
+        const timeout = 4000 + Math.min(attempt, 3) * 1500;
+        let again = false;
+        for (let i = 0; i < SLOTS && alive(); i++) {
+          if (isGhost(i)) { dbg('skipping ghost slot', i); continue; }
+          let tries = 0, resolved = false;
+          while (!resolved && tries++ < 3 && alive()) {
+            let p = null;
+            try { p = await mkPeer(slotId(i)); }
+            catch (e) {
+              if (!e || e.type !== 'unavailable-id') { emit('status', 'offline'); again = true; resolved = true; break; }
+              dbg('slot', i, 'taken, trying to join');
+              if (!gp) { try { gp = await mkPeer(null); } catch (_) { emit('status', 'offline'); again = true; resolved = true; break; } }
+              if (!alive()) { closeGp(); return; }
+              const r = await joinSlot(gp, i, timeout);
+              dbg('slot', i, 'result', r);
+              if (r === 'joined') return;
+              if (r === 'rejected') { stopped = true; closeGp(); return; }
+              if (r === 'ghost') { ghosts.set(i, now()); resolved = true; }
+              continue; // 'free': it vanished, claim it
+            }
+            closeGp();
+            if (!alive()) { try { p.destroy(); } catch (_) {} return; }
+            self.slot = i; dbg('host on slot', i); becomeHost(p); return;
           }
+          if (again) break;
         }
-        if (stopped || my !== epoch) { if (p) try { p.destroy(); } catch (_) {} return; }
-        if (p) { becomeHost(p); return; }
-        const r = await tryGuest(my);
-        if (r === 'ok' || r === 'stop') return;
-        await sleep(600 + Math.random() * 600); attempt++;
+        if (SLOTS && [...Array(SLOTS).keys()].every(isGhost)) ghosts.clear();
+        await sleep(Math.min(3000, 400 + attempt * 400)); attempt++;
       }
+      closeGp();
     }
 
     function dropGuest(c, announce) {
@@ -122,45 +181,9 @@
         c.on('close', gone); c.on('error', gone);
       });
       stopPing = Timers.every(1000, () => {
-        for (const [c, g] of guests) if (now() - g.lastSeen > 9000) dropGuest(c, true);
+        for (const [c, g] of guests) if (now() - g.lastSeen > 7000) dropGuest(c, true);
       });
       emit('role', 'host'); emit('status', 'online');
-    }
-
-    function tryGuest(my) {
-      return new Promise(async (resolve) => {
-        let p;
-        try { p = await mkPeer(null); } catch (e) { resolve('retry'); return; }
-        if (stopped || my !== epoch) { try { p.destroy(); } catch (_) {} resolve('stop'); return; }
-        let settled = false, joined = false;
-        const c = p.connect(cfg.hostId, { reliable: true, serialization: 'json' });
-        const bail = (r) => { if (settled) return; settled = true; clearTimeout(timer); try { c.close(); } catch (_) {} try { p.destroy(); } catch (_) {} resolve(r); };
-        const timer = setTimeout(() => bail('retry'), 7000);
-        p.on('error', () => { if (!joined) bail('retry'); });
-        c.on('open', () => { try { c.send({ t: 'hello', name: cfg.name }); } catch (_) {} });
-        c.on('data', (m) => {
-          if (!m || typeof m !== 'object') return;
-          if (!joined) {
-            if (m.t === 'welcome') {
-              joined = true; settled = true; clearTimeout(timer);
-              peer = p; conn = c; self.role = 'guest'; lastSeen = now();
-              startGuestPings();
-              emit('welcome', m);
-              emit('role', 'guest'); emit('status', 'online');
-              resolve('ok');
-            } else if (m.t === 'reject') {
-              settled = true; clearTimeout(timer); try { c.close(); } catch (_) {} try { p.destroy(); } catch (_) {}
-              stopped = true; emit('rejected', m.why); resolve('stop');
-            }
-            return;
-          }
-          lastSeen = now();
-          if (m.t === 'pong') { onPong(m); return; }
-          emit('msg', m);
-        });
-        const lost = () => { if (joined) hostLost(c); else bail('retry'); };
-        c.on('close', lost); c.on('error', lost);
-      });
     }
 
     function hostLost(c) {
@@ -177,7 +200,7 @@
       const fast = setInterval(() => { ping(); if (++burst >= 10) clearInterval(fast); }, 110);
       stopPing = Timers.every(1000, () => {
         ping();
-        if (conn && now() - lastSeen > 9000) hostLost(conn);
+        if (conn && now() - lastSeen > 6000) hostLost(conn);
       });
       const prev = stopPing;
       stopPing = () => { clearInterval(fast); prev(); };

@@ -12,6 +12,11 @@ Players can join mid game (they sit out the current round). If the referee leave
 - Fix: the word is shown misspelled. Type it correctly. One try per round.
 - Hear: the word is spoken. Spell it. One try per round.
 
+## How connecting works
+- There are 6 host slots. A player claims the first free slot and becomes the referee, or joins whoever holds it.
+- If a slot answers nothing (a ghost left by a connection that died without closing, which the public broker keeps for about 100 seconds) it is skipped, so nobody is locked out.
+- Add `?debug=1` to the URL to log what the connection layer is doing in the browser console.
+
 ## How timing stays fair
 - Both browsers sync clocks with repeated pings and keep the lowest round trip sample.
 - The referee sets one shared start instant. Each player measures their own finish from that instant.
