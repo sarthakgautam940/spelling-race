@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spelling Race</title>
+<meta name="description" content="A private 1v1 spelling race. Spell it first, spell it right.">
+<meta name="theme-color" content="#ffffff">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%230b0b0b'/%3E%3Ccircle cx='46' cy='18' r='6' fill='%2322c55e'/%3E%3Cpath d='M20 44c0 4 4 6 9 6 6 0 9-3 9-7 0-10-17-6-17-15 0-4 3-7 9-7 5 0 8 2 9 6' fill='none' stroke='white' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css?v=1">
+</head>
+<body>
+<main id="app">
+
+  <section id="v-home" class="view home">
+    <h1 class="title">Spelling Race</h1>
+    <p class="lede">Spell it first. Spell it right.</p>
+    <button id="joinBtn" class="btn primary big" type="button">Join private room</button>
+  </section>
+
+  <section id="v-code" class="view narrow hidden">
+    <h2>Room code</h2>
+    <form id="codeForm" autocomplete="off" novalidate>
+      <input id="codeInput" class="field" inputmode="numeric" pattern="[0-9]*" maxlength="5" placeholder="00000" aria-label="Room code" autocomplete="off" spellcheck="false">
+      <p id="codeErr" class="err" role="alert"></p>
+      <button class="btn primary" type="submit">Continue</button>
+    </form>
+    <button class="link" data-back="home" type="button">Back</button>
+  </section>
+
+  <section id="v-name" class="view narrow hidden">
+    <h2>Your name</h2>
+    <form id="nameForm" autocomplete="off" novalidate>
+      <input id="nameInput" class="field" maxlength="14" placeholder="Name" aria-label="Your name" autocomplete="off" spellcheck="false" autocapitalize="words">
+      <p id="nameErr" class="err" role="alert"></p>
+      <button class="btn primary" type="submit">Enter room</button>
+    </form>
+    <button class="link" data-back="code" type="button">Back</button>
+  </section>
+
+  <section id="v-room" class="view room hidden">
+    <header class="bar">
+      <div class="brand">Spelling Race</div>
+      <div class="bar-right">
+        <span id="net" class="chip" title="Round trip time to your opponent"><i class="dot"></i><span id="netTxt">connecting</span></span>
+        <button id="soundBtn" class="chip btn-chip" type="button" aria-pressed="true">Sound on</button>
+        <button id="leaveBtn" class="chip btn-chip" type="button">Leave</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <div class="players" id="players">
+      <article class="card" id="card0"></article>
+      <article class="card" id="card1"></article>
+    </div>
+
+    <div class="stage" id="stage">
+      <div id="st-wait" class="pane center">
+        <h2 id="waitTitle">Waiting for your friend</h2>
+        <p class="muted" id="waitSub">They open the site, tap Join private room, and enter code 91409.</p>
+      </div>
+
+      <div id="st-ready" class="pane center hidden">
+        <h2>Both players are here</h2>
+        <p class="muted">The race starts when you both press Ready.</p>
+        <button id="readyBtn" class="btn primary big" type="button">Ready</button>
+      </div>
+
+      <div id="st-count" class="pane center hidden">
+        <div id="countNum" class="countnum">3</div>
+        <p class="muted" id="countHint">Get ready</p>
+      </div>
+
+      <div id="st-live" class="pane center hidden">
+        <div class="livebar"><div id="timerFill" class="timerfill"></div></div>
+        <div class="liverow"><span id="clock" class="clock">0.0</span></div>
+        <div id="prompt" class="prompt" aria-live="off"></div>
+        <p id="promptHint" class="muted hint"></p>
+        <button id="hearBtn" class="btn ghost hidden" type="button">Hear it again</button>
+        <input id="typer" class="typer" type="text" inputmode="text" enterkeyhint="send" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-label="Type your answer" maxlength="30">
+        <p id="liveNote" class="note"></p>
+      </div>
+
+      <div id="st-result" class="pane center hidden">
+        <h2 id="resTitle" class="restitle"></h2>
+        <div id="resWord" class="resword"></div>
+        <p id="resSub" class="muted"></p>
+        <div id="resRows" class="rows"></div>
+        <div class="nextbar"><div id="nextFill" class="nextfill"></div></div>
+      </div>
+
+      <div id="st-paused" class="pane center hidden">
+        <h2 id="pausedTitle">Paused</h2>
+        <p class="muted" id="pausedSub">Take a breath.</p>
+        <button id="resumeBtn" class="btn primary big" type="button">Resume</button>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="seg-wrap">
+        <div class="seg" id="segMode" role="group" aria-label="Mode">
+          <button type="button" data-k="mode" data-v="copy">Copy</button>
+          <button type="button" data-k="mode" data-v="fix">Fix</button>
+          <button type="button" data-k="mode" data-v="hear">Hear</button>
+        </div>
+        <div class="seg" id="segLevel" role="group" aria-label="Difficulty">
+          <button type="button" data-k="level" data-v="ramp">Ramp</button>
+          <button type="button" data-k="level" data-v="easy">Easy</button>
+          <button type="button" data-k="level" data-v="medium">Medium</button>
+          <button type="button" data-k="level" data-v="hard">Hard</button>
+        </div>
+      </div>
+      <p id="modeNote" class="muted small"></p>
+      <div class="ctl-row">
+        <div id="history" class="history" aria-label="Recent rounds"></div>
+        <div class="ctl-btns">
+          <button id="pauseBtn" class="chip btn-chip" type="button">Pause</button>
+          <button id="resetBtn" class="chip btn-chip" type="button">Reset scores</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+<script src="engine.js?v=1" defer></script>
+<script src="net.js?v=1" defer></script>
+<script src="app.js?v=1" defer></script>
+</body>
+</html>

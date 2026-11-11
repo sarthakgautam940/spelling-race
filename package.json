@@ -1,0 +1,10 @@
+{
+  "name": "spelling-race",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A private 1v1 spelling race. Static site, peer to peer.",
+  "scripts": {
+    "test": "node --test test/engine.test.js",
+    "start": "npx --yes serve -l 3000 ."
+  }
+}
