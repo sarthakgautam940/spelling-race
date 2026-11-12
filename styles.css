@@ -161,3 +161,23 @@ button { cursor: pointer; }
   .bar { justify-content: flex-end; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* game flow */
+.waitnote { margin: -4px 4px 12px; font-size: 14px; color: var(--mute); }
+.roundbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin: 0 4px 10px; }
+.rinfo { font-weight: 700; font-size: 15px; }
+.dots { display: flex; gap: 6px; align-items: center; }
+.dots i { width: 12px; height: 12px; border-radius: 50%; background: var(--line); display: inline-block; }
+.dots i.w { background: var(--green); } .dots i.l { background: var(--red); } .dots i.n { background: var(--faint); }
+.dots i.cur { background: #fff; box-shadow: inset 0 0 0 3px var(--ink); }
+.ptsl { display: block; font-size: 11px; font-weight: 700; color: var(--mute); letter-spacing: 0; text-align: right; margin-top: 2px; }
+.crown { font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px; background: var(--yellow); color: var(--ink); white-space: nowrap; }
+.tag.done { background: var(--ink); color: #fff; }
+.note.orange { color: var(--orange); }
+.rpts { font-size: 15px; font-weight: 800; color: var(--green-ink); margin-top: 2px; }
+.rpts.zero { color: var(--faint); }
+.frows { width: 100%; display: flex; flex-direction: column; gap: 8px; text-align: left; margin-top: 6px; }
+.frow { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 14px; background: var(--soft); border-radius: 18px; padding: 10px 16px 10px 12px; }
+.frow.win { background: var(--green-soft); box-shadow: inset 0 0 0 2px var(--green); }
+
+.row .rt.none, .row .rt.bad { font-size: 20px; }

@@ -159,14 +159,31 @@
     'stake steak suite sweet tail tale taught taut tea tee team teem tear tier throne thrown tide tied toe tow vain vane vein waist waste ' +
     'wait weight war wore ware wear way weigh weak week wheel weal wood would yoke yolk yore your youre').split(' '));
 
-  /* Leaderboard order: most round wins, then accuracy, then faster average, then name. */
-  function rank(players) {
-    const acc = (p) => (p.precN ? p.precSum / p.precN : -1);
-    const avg = (p) => (p.correct ? p.msSum / p.correct : Infinity);
-    return players.slice().sort((a, b) =>
-      (b.wins - a.wins) || (acc(b) - acc(a)) || (avg(a) - avg(b)) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  /* ---------- scoring ----------
+     Each round pays by finishing place, so every player is ranked every round, not just the winner:
+     1st 10, 2nd 7, 3rd 5, 4th 3, 5th 2, then 1 point for any other correct answer.
+     A clean answer (no wrong keys in Copy, exact spelling in Fix and Hear) earns 2 more, so accuracy always counts.
+     A wrong or missing answer earns nothing. */
+  const PLACE_POINTS = [10, 7, 5, 3, 2, 1];
+  const CLEAN_BONUS = 2;
+  function roundPoints(place, ok, prec) {
+    if (!ok) return { place: 0, clean: 0, total: 0 };
+    const p = PLACE_POINTS[Math.min(place, PLACE_POINTS.length - 1)];
+    const clean = prec != null && prec >= 0.999 ? CLEAN_BONUS : 0;
+    return { place: p, clean, total: p + clean };
   }
 
-  const api = { rank, distance, similarity, align, describe, troubleLetters, opCounts, misspell, levelWeights, HOMOPHONES };
+  /* Game ranking, best first: points, then round wins, then accuracy, then faster average, then faster best. */
+  function compare(a, b) {
+    const acc = (p) => (p.precN ? p.precSum / p.precN : -1);
+    const avg = (p) => (p.correct ? p.msSum / p.correct : Infinity);
+    const best = (p) => (p.bestMs == null ? Infinity : p.bestMs);
+    return (b.points - a.points) || (b.wins - a.wins) || (acc(b) - acc(a)) || (avg(a) - avg(b)) || (best(a) - best(b)) || 0;
+  }
+  function rank(players) {
+    return players.slice().sort((a, b) => compare(a, b) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  }
+
+  const api = { rank, compare, roundPoints, PLACE_POINTS, CLEAN_BONUS, distance, similarity, align, describe, troubleLetters, opCounts, misspell, levelWeights, HOMOPHONES };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.Engine = api;
 })(typeof window !== 'undefined' ? window : globalThis);

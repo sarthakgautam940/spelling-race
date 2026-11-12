@@ -2,12 +2,16 @@
   'use strict';
 
   const ROOM = '91409';
+  const qs = new URLSearchParams(location.search);
+  const SPEED = qs.get('fast') ? 0.3 : 1;            // test switch: shorter pauses
   const MAX = 8;
-  const COUNT_MS = 3000, RESULT_MS = 3800, NOWIN_MS = 3000;
+  const TOTAL = Math.min(10, +qs.get('rounds') || 10); // rounds per game (always 10 unless testing)
+  const COUNT_MS = 3000 * SPEED, RESULT_MS = 4800 * SPEED, NOWIN_MS = 3200 * SPEED;
+  const WINDOW_MS = 4000 * SPEED;                            // others keep typing this long after the first correct answer
+  const FINAL_MS = 16000 * SPEED, AWAY_GRACE = 25000;
   const E = window.Engine;
   const $ = (id) => document.getElementById(id);
   const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
-  const qs = new URLSearchParams(location.search);
   const brokers = qs.get('broker') ? qs.get('broker').split(',') : BROKERS; // ?broker=ws://localhost:8883 for testing
 
   /* ---------- small helpers ---------- */
@@ -43,16 +47,16 @@
 
   /* ---------- state ---------- */
   let net = null, me = '', role = null, S = null, A = null, R = null, lastState = null;
-  let inRoom = false, lastResultN = 0, banner = '', resetArm = 0, progs = {};
+  let inRoom = false, lastResultN = 0, lastFinalId = '', renderedFinal = '', banner = '', resetArm = 0, progs = {};
   const T = window.Timers;
 
-  const newState = () => ({ v: 0, phase: 'wait', settings: { mode: 'copy', level: 'ramp' }, players: {}, order: [], round: null, result: null, history: [], pauseNext: false, pausedWhy: null, roundN: 0, rampN: 0 });
-  const newPlayer = (name) => ({ name, wins: 0, streak: 0, bestStreak: 0, connected: true, ready: false, rounds: 0, correct: 0, precSum: 0, precN: 0, msSum: 0, bestMs: null, chars: 0, letters: {} });
-  
+  const newState = () => ({ v: 0, phase: 'wait', settings: { mode: 'copy', level: 'ramp' }, players: {}, order: [], waiting: [], round: null, result: null, final: null, history: [], crowns: {}, match: { no: 0, round: 0, total: TOTAL }, pauseNext: false, pausedWhy: null, roundN: 0 });
+  const newPlayer = (name) => ({ name, points: 0, wins: 0, streak: 0, bestStreak: 0, connected: true, ready: false, rounds: 0, correct: 0, precSum: 0, precN: 0, msSum: 0, bestMs: null, chars: 0, letters: {} });
+
   /* ---------- views ---------- */
   const views = ['v-home', 'v-code', 'v-name', 'v-room'];
   function show(id) { views.forEach((v) => $(v).classList.toggle('hidden', v !== id)); inRoom = id === 'v-room'; window.scrollTo(0, 0); }
-  const panes = ['st-wait', 'st-ready', 'st-count', 'st-live', 'st-result', 'st-paused'];
+  const panes = ['st-wait', 'st-ready', 'st-count', 'st-live', 'st-result', 'st-final', 'st-paused'];
   let curPane = '';
   function pane(id) { if (curPane === id) return; curPane = id; panes.forEach((p) => $(p).classList.toggle('hidden', p !== id)); }
 
@@ -119,11 +123,19 @@
   /* ---------- host: lobby ---------- */
   function initHost() {
     if (A && A.syncStop) A.syncStop();
-    A = { answer: null, attempts: {}, live: {}, used: new Set(), t: {}, idle: 0, wordSet: null };
-    if (lastState) {
+    if (A && A.graceT) T.clear(A.graceT);
+    A = { answer: null, attempts: {}, live: {}, used: new Set(), t: {}, idle: 0, wordSet: null, grace: false, graceT: 0 };
+    if (lastState) { // another host left: keep the game for a moment so everyone can come back with their points
       S = lastState; lastState = null;
-      S.phase = 'wait'; S.round = null; S.result = null; S.pauseNext = false; S.pausedWhy = null;
-      for (const k of S.order) { S.players[k].connected = false; S.players[k].ready = false; }
+      S.phase = 'wait'; S.round = null; S.result = null; S.final = null; S.waiting = []; S.pauseNext = false; S.pausedWhy = null;
+      for (const k of S.order) { if (k !== me) { S.players[k].connected = false; S.players[k].ready = false; } }
+      A.grace = true;
+      A.graceT = T.after(AWAY_GRACE, () => {
+        if (!S) return;
+        A.grace = false;
+        for (const k of S.order.slice()) if (!S.players[k].connected) { delete S.players[k]; S.order = S.order.filter((x) => x !== k); }
+        maybeLobby(); bump();
+      });
     } else S = newState();
     A.syncStop = T.every(4000, () => { if (role === 'host' && S && net) net.sendAll({ t: 'state', s: S }); }); // heals any dropped message
     addPlayer(me);
@@ -134,43 +146,65 @@
     S.players[name].connected = true; S.players[name].ready = false;
     if (!S.order.includes(name)) S.order.push(name);
   }
-  const connCount = () => S.order.filter((k) => S.players[k].connected).length;
+  const active = () => S.order.filter((k) => S.players[k].connected);   // players in the current game
+  const connCount = () => active().length;
+  const matchOn = () => S.match.round > 0;                              // a game is underway: newcomers wait for the next one
   function clearTimers() { for (const k of Object.keys(A.t)) { T.clear(A.t[k]); delete A.t[k]; } }
+
+  /* Everyone online, zero points. Players who left are gone, and anyone waiting joins now. */
+  function freshGame() {
+    clearTimers();
+    for (const k of S.order.slice()) if (!S.players[k].connected) { delete S.players[k]; S.order = S.order.filter((x) => x !== k); }
+    for (const k of S.order) S.players[k] = Object.assign(newPlayer(k), { connected: true });
+    for (const n of S.waiting) addPlayer(n);
+    S.waiting = [];
+    S.history = []; S.match.round = 0; S.round = null; S.result = null; S.final = null; S.pauseNext = false; S.pausedWhy = null;
+    A.idle = 0; progs = {}; R = null;
+  }
+
   function maybeLobby() {
-    if (connCount() < 2) {
-      if (S.phase !== 'wait') { clearTimers(); S.phase = 'wait'; S.round = null; S.result = null; S.pauseNext = false; S.pausedWhy = null; }
-      S.order.forEach((k) => (S.players[k].ready = false));
-    } else if (S.phase === 'wait') {
-      S.phase = 'ready'; S.order.forEach((k) => (S.players[k].ready = false));
+    const act = connCount();
+    if (act < 2) {
+      if (A.grace) { S.phase = 'wait'; return; } // old players may still be coming back after a host change
+      if (S.phase !== 'wait' || matchOn() || S.waiting.length) { freshGame(); }
+      S.phase = connCount() >= 2 ? 'ready' : 'wait';
+      return;
+    }
+    if (S.phase === 'wait') {
+      if (S.match.round > 0 && S.match.round < S.match.total) {
+        S.phase = 'paused'; S.pausedWhy = 'host'; // a host change is not a pause: carry on by itself once people are back
+        A.t.resume = T.after(3000, () => { if (S && S.phase === 'paused' && S.pausedWhy === 'host' && connCount() >= 2) startRound(); });
+      }
+      else { if (S.match.round) freshGame(); S.phase = 'ready'; S.order.forEach((k) => (S.players[k].ready = false)); }
     }
   }
+
   function onHello(m, accept) {
     if (!S) return accept(false, 'full');
     const name = String(m.name || '').replace(/\s+/g, ' ').trim().slice(0, 14);
     if (!name) return accept(false, 'name');
-    const key = S.order.find((k) => k.toLowerCase() === name.toLowerCase());
+    const lower = name.toLowerCase();
+    const key = S.order.find((k) => k.toLowerCase() === lower);
     if (key) {
       if (S.players[key].connected) return accept(false, 'name');
-      S.players[key].connected = true; S.players[key].ready = false;
+      S.players[key].connected = true; S.players[key].ready = false; // came back within the host handover
       accept(true, null, { name: key });
-    } else if (S.order.length < MAX) {
-      addPlayer(name); accept(true, null, { name });
-    } else {
-      const stale = S.order.find((k) => !S.players[k].connected);
-      if (!stale) return accept(false, 'full');
-      delete S.players[stale]; S.order = S.order.filter((k) => k !== stale);
-      addPlayer(name); accept(true, null, { name });
-    }
+    } else if (S.waiting.some((k) => k.toLowerCase() === lower)) return accept(false, 'name');
+    else if (connCount() + S.waiting.length >= MAX) return accept(false, 'full');
+    else if (matchOn()) { S.waiting.push(name); accept(true, null, { name }); } // joins when this game ends, on zero points
+    else { addPlayer(name); accept(true, null, { name }); }
     maybeLobby(); bump();
   }
+
   function onGuestLeft(name) {
-    if (!S || !S.players[name]) return;
-    S.players[name].connected = false; S.players[name].ready = false;
+    if (!S) return;
+    S.waiting = S.waiting.filter((k) => k !== name);
+    if (S.players[name]) { delete S.players[name]; S.order = S.order.filter((k) => k !== name); } // gone from the board, points and all
     delete progs[name];
     maybeLobby();
     if (S.phase === 'round') checkAllIn();
-    else if (S.phase === 'ready' && S.order.every((k) => !S.players[k].connected || S.players[k].ready)) startRound();
-    if (S) bump();
+    else if (S.phase === 'ready' && connCount() >= 2 && active().every((k) => S.players[k].ready)) startGame();
+    bump();
   }
 
   /* ---------- message routing ---------- */
@@ -198,7 +232,7 @@
       case 'ready':
         if (S.phase !== 'ready') return;
         p.ready = !!m.v;
-        if (connCount() >= 2 && S.order.every((k) => !S.players[k].connected || S.players[k].ready)) startRound(); else bump();
+        if (connCount() >= 2 && active().every((k) => S.players[k].ready)) startGame(); else bump();
         break;
       case 'set':
         if (m.k === 'mode' && ['copy', 'fix', 'hear'].includes(m.v)) S.settings.mode = m.v;
@@ -206,16 +240,16 @@
         else return;
         bump(); break;
       case 'pause':
-        if (S.phase === 'round' || S.phase === 'result') { S.pauseNext = !S.pauseNext; bump(); }
+        if ((S.phase === 'round' || S.phase === 'result') && S.match.round < S.match.total) { S.pauseNext = !S.pauseNext; bump(); }
         break;
       case 'resume':
         if (S.phase === 'paused') startRound();
         break;
+      case 'next':
+        if (S.phase === 'final') startGame();
+        break;
       case 'reset':
-        clearTimers();
-        S.order.forEach((k) => { const c = S.players[k].connected; S.players[k] = newPlayer(k); S.players[k].connected = c; });
-        S.history = []; S.rampN = 0; S.round = null; S.result = null; S.pauseNext = false; S.pausedWhy = null; S.phase = 'wait'; A.used.clear(); A.idle = 0; progs = {};
-        maybeLobby(); R = null; bump(); break;
+        freshGame(); S.phase = connCount() >= 2 ? 'ready' : 'wait'; bump(); break;
       case 'sub': onSub(from, m); break;
     }
   }
@@ -245,15 +279,23 @@
     return { word, shown };
   }
 
+  function startGame() {
+    if (!S || (S.phase !== 'ready' && S.phase !== 'final')) return;
+    freshGame();
+    S.match.no++;
+    if (connCount() < 2) { S.phase = 'wait'; bump(); return; }
+    startRound();
+  }
+
   function startRound() {
     clearTimers();
-    S.roundN++; S.rampN++;
+    S.roundN++; S.match.round++;
     const mode = S.settings.mode;
-    const { word, shown } = pickRound(mode, S.settings.level, S.rampN);
+    const { word, shown } = pickRound(mode, S.settings.level, S.match.round);
     const len = word.length;
     const limit = Math.min(30000, 9000 + len * 1200 + (mode === 'copy' ? 0 : 3000));
     A.answer = word; A.attempts = {}; A.live = {};
-    S.round = { n: S.roundN, mode, shown: mode === 'hear' ? null : shown, len, say: mode === 'hear' ? word : null, startAt: net.hostNow() + COUNT_MS, limit, locked: [], in: S.order.filter((k) => S.players[k].connected) };
+    S.round = { n: S.roundN, no: S.match.round, mode, shown: mode === 'hear' ? null : shown, len, say: mode === 'hear' ? word : null, startAt: net.hostNow() + COUNT_MS, limit, locked: [], done: [], first: null, closeAt: null, in: active() };
     S.result = null; S.phase = 'round'; S.pausedWhy = null;
     S.order.forEach((k) => (S.players[k].ready = false));
     A.t.end = T.after(COUNT_MS + limit, finish);
@@ -270,7 +312,6 @@
     const inn = roundPlayers();
     if (!inn.length || inn.every((k) => A.attempts[k])) finish();
   }
-  function graceMs() { const rtt = net.maxPeerRtt() || 60; return Math.min(220, Math.max(45, rtt / 2 + 45)); }
 
   function onSub(name, m) {
     if (S.phase !== 'round' || !S.round || m.n !== S.round.n || A.attempts[name] || !S.round.in.includes(name)) return;
@@ -278,10 +319,16 @@
     const ms = Math.max(0, Number(m.ms) || 0);
     const ok = text === A.answer;
     A.attempts[name] = { text, ms, ok, keys: m.keys | 0, errs: m.errs | 0, el: String(m.el || '').slice(0, 60), at: performance.now() };
-    if (!ok) S.round.locked.push(name);
+    if (ok) S.round.done.push(name); else S.round.locked.push(name);
     if (roundPlayers().every((k) => A.attempts[k])) { finish(); return; }
-    if (ok) { if (!A.t.grace) A.t.grace = T.after(graceMs(), finish); } // wait for a possibly faster answer still in flight
-    else bump();
+    if (ok && !S.round.first) {
+      // the clock keeps running for everyone else, so placings are decided on measured time, not arrival order
+      S.round.first = { name, ms };
+      const left = Math.max(300, Math.min(WINDOW_MS, S.round.startAt + S.round.limit - net.hostNow()));
+      S.round.closeAt = net.hostNow() + left;
+      A.t.close = T.after(left, finish);
+    }
+    bump();
   }
 
   function finish() {
@@ -292,7 +339,7 @@
     const oks = inn.filter((k) => A.attempts[k] && A.attempts[k].ok).sort((a, b) => A.attempts[a].ms - A.attempts[b].ms || A.attempts[a].at - A.attempts[b].at);
     const winner = oks.length ? oks[0] : null;
     const margin = oks.length > 1 ? A.attempts[oks[1]].ms - A.attempts[oks[0]].ms : null;
-    const res = { n: r.n, answer, mode, shown: mode === 'fix' ? r.shown : null, winner, margin, per: {}, rank: [] };
+    const res = { n: r.n, no: r.no, answer, mode, shown: mode === 'fix' ? r.shown : null, winner, margin, per: {}, rank: [] };
     let anyKeys = false;
     for (const name of inn) {
       const p = S.players[name], a = A.attempts[name], lv = A.live[name];
@@ -307,14 +354,17 @@
         if (!a.ok) { ops = E.align(a.text, answer); notes = E.describe(ops); for (const ch of E.troubleLetters(ops)) p.letters[ch] = (p.letters[ch] || 0) + 1; }
       }
       if (prec != null) { p.precSum += prec; p.precN++; }
+      const place = oks.indexOf(name);
+      const pts = E.roundPoints(place < 0 ? 0 : place, place >= 0, prec);
+      p.points += pts.total;
       if (a && a.ok) { p.correct++; p.msSum += a.ms; p.chars += answer.length; if (p.bestMs == null || a.ms < p.bestMs) p.bestMs = a.ms; }
       if (name === winner) { p.wins++; p.streak++; p.bestStreak = Math.max(p.bestStreak, p.streak); } else p.streak = 0;
-      res.per[name] = { ok: !!(a && a.ok), ms: a ? a.ms : null, text: a ? a.text : null, prec, ops, notes };
+      res.per[name] = { ok: !!(a && a.ok), ms: a ? a.ms : null, text: a ? a.text : null, prec, ops, notes, pts, place: place < 0 ? null : place + 1 };
     }
     const tier = (k) => (res.per[k].ok ? 0 : res.per[k].text != null ? 1 : 2);
     res.rank = inn.slice().sort((a, b) => tier(a) - tier(b) || (res.per[a].ms || 0) - (res.per[b].ms || 0));
     A.idle = anyKeys ? 0 : A.idle + 1;
-    S.history.push(winner || '-'); if (S.history.length > 14) S.history.shift();
+    S.history.push(winner || '-');
     S.result = res; S.phase = 'result';
     const wait = winner ? RESULT_MS : NOWIN_MS;
     res.wait = wait;
@@ -325,9 +375,23 @@
   function afterResult() {
     if (!S || S.phase !== 'result') return;
     if (connCount() < 2) { maybeLobby(); bump(); return; }
+    if (S.match.round >= S.match.total) { finishGame(); return; }
     if (A.idle >= 3) { A.idle = 0; S.phase = 'paused'; S.pausedWhy = 'idle'; bump(); return; }
     if (S.pauseNext) { S.pauseNext = false; S.phase = 'paused'; S.pausedWhy = 'pause'; bump(); return; }
     startRound();
+  }
+
+  function finishGame() {
+    const list = E.rank(active().map((k) => S.players[k]));
+    const tied = list.filter((p) => E.compare(list[0], p) === 0).map((p) => p.name);
+    for (const n of tied) S.crowns[n] = (S.crowns[n] || 0) + 1;
+    S.final = {
+      id: Math.random().toString(36).slice(2), no: S.match.no, winners: tied, wait: FINAL_MS,
+      rank: list.map((p) => ({ name: p.name, points: p.points, wins: p.wins, correct: p.correct, acc: p.precN ? p.precSum / p.precN : null, avg: p.correct ? p.msSum / p.correct : null, best: p.bestMs }))
+    };
+    S.phase = 'final'; S.pauseNext = false;
+    A.t.next = T.after(FINAL_MS, startGame);
+    bump();
   }
 
   function bump() {
@@ -342,6 +406,7 @@
     if (S.phase === 'round' && S.round && (!R || R.n !== S.round.n)) setupRound(S.round);
     if (S.phase === 'round' && S.round && R && S.round.locked.includes(me) && !R.done) { R.done = true; R.locked = true; }
     if (S.phase === 'result' && S.result && lastResultN !== S.result.n) { lastResultN = S.result.n; onResult(); }
+    if (S.phase === 'final' && S.final && lastFinalId !== S.final.id) { lastFinalId = S.final.id; onFinal(); }
     render();
   }
 
@@ -353,6 +418,12 @@
     const t = $('typer'); t.value = ''; t.readOnly = true; t.className = 'typer';
     $('liveNote').textContent = ''; $('liveNote').className = 'note';
     paintProgs();
+  }
+
+  function onFinal() {
+    try { speechSynthesis.cancel(); } catch (_) {}
+    if (S.final.winners.includes(me)) Snd.win(); else Snd.done();
+    $('typer').readOnly = true;
   }
 
   function onResult() {
@@ -458,7 +529,7 @@
     else { prm.classList.add('hear'); prm.textContent = Array(R.len).fill('_').join(' '); hint.textContent = R.len + ' letters. Spell it and press Enter. One try.'; if (!R.spectator) speak(R.say); }
     $('liveNote').textContent = ''; $('liveNote').className = 'note';
     if (R.locked) lockedNote();
-    if (R.spectator) { typer.readOnly = true; $('liveNote').textContent = 'You joined mid round. You are in from the next one.'; }
+    if (R.spectator) { typer.readOnly = true; $('liveNote').textContent = 'A game is underway. You play in the next one.'; }
     Snd.go();
     if (!R.locked && !R.spectator) typer.focus({ preventScroll: true });
   }
@@ -485,7 +556,17 @@
     if (!R.started) enterLive();
     const el = t - R.startLocal;
     if (!R.done) $('clock').textContent = (el / 1000).toFixed(1) + ' s'; else if (R.ms != null) $('clock').textContent = (R.ms / 1000).toFixed(2) + ' s';
-    const left = Math.max(0, 1 - el / R.limit), tf = $('timerFill');
+    let left = Math.max(0, 1 - el / R.limit);
+    const fin = S.round && S.round.first;
+    if (fin && S.round.closeAt) {
+      const rem = net.toLocal(S.round.closeAt) - t;
+      left = Math.max(0, Math.min(1, rem / WINDOW_MS));
+      if (!R.done && !R.locked) {
+        const secs = Math.max(0, Math.ceil(rem / 1000)), key = fin.name + secs;
+        if (R.noteKey !== key) { R.noteKey = key; $('liveNote').textContent = (fin.name === me ? 'You' : fin.name) + ' finished first. ' + secs + ' s left'; $('liveNote').className = 'note orange'; }
+      }
+    }
+    const tf = $('timerFill');
     tf.style.transform = 'scaleX(' + left.toFixed(4) + ')';
     tf.className = 'timerfill' + (left < 0.2 ? ' danger' : left < 0.5 ? ' warn' : '');
   }
@@ -494,37 +575,42 @@
   function renderBoard() {
     const board = $('board'); board.textContent = '';
     if (!S) return;
-    const list = E.rank(S.order.map((k) => S.players[k]));
+    const list = E.rank(S.order.filter((k) => S.players[k].connected).map((k) => S.players[k])); // only people who are here
     list.forEach((p, i) => {
       const name = p.name, isMe = name === me;
       const row = el('div', 'prow'); row.dataset.name = name;
       if (isMe) row.classList.add('me');
-      if (!p.connected) row.classList.add('away');
       row.append(el('div', 'rank r' + (i + 1), String(i + 1)));
       const main = el('div', 'pmain');
       const top = el('div', 'card-top');
       const nm = el('div', 'pname', p.name); if (isMe) nm.append(el('span', 'you', ' (you)'));
       top.append(nm);
       const inRound = S.phase === 'round' && S.round && S.round.in.includes(name);
-      const locked = inRound && S.round.locked.includes(name);
-      if (!p.connected) top.append(el('span', 'tag', 'Away'));
-      else if (S.phase === 'round' && S.round && !inRound) top.append(el('span', 'tag', 'Next round'));
-      else if (locked) top.append(el('span', 'tag out', 'Out'));
+      if (inRound && S.round.locked.includes(name)) top.append(el('span', 'tag out', 'Out'));
+      else if (inRound && S.round.done.includes(name)) top.append(el('span', 'tag done', 'Done'));
       else if (S.phase === 'ready' && p.ready) top.append(el('span', 'tag ready', 'Ready'));
       if (p.streak >= 2) top.append(el('span', 'streak', p.streak + ' in a row'));
+      if (S.crowns[name]) top.append(el('span', 'crown', S.crowns[name] + (S.crowns[name] === 1 ? ' game won' : ' games won')));
       main.append(top);
       const st = el('div', 'stats');
-      const mk = (k, v) => { const s = el('span', null, k + ' '); s.append(el('b', null, v)); return s; };
-      st.append(mk('Accuracy', p.precN ? Math.round((p.precSum / p.precN) * 100) + '%' : 'none'), mk('Avg', p.correct ? fmt(p.msSum / p.correct) : 'none'), mk('Best', p.bestMs != null ? fmt(p.bestMs) : 'none'));
+      const mk = (k, v) => { const sp = el('span', null, k + ' '); sp.append(el('b', null, v)); return sp; };
+      st.append(mk('Wins', String(p.wins)), mk('Accuracy', p.precN ? Math.round((p.precSum / p.precN) * 100) + '%' : 'none'), mk('Avg', p.correct ? fmt(p.msSum / p.correct) : 'none'));
       main.append(st);
       const trips = Object.entries(p.letters).filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([l]) => l);
       if (trips.length) main.append(el('div', 'trips', 'Trips on ' + trips.join(', ')));
-      row.append(main, el('div', 'wins', String(p.wins)), el('div', 'prog'));
-      if (S.phase === 'result' && S.result && S.result.per[name]) {
-        if (S.result.winner === name) row.classList.add('win');
-      }
+      const pts = el('div', 'wins'); pts.append(document.createTextNode(String(p.points)), el('span', 'ptsl', 'pts'));
+      row.append(main, pts, el('div', 'prog'));
+      if (S.phase === 'result' && S.result && S.result.winner === name) row.classList.add('win');
+      if (S.phase === 'final' && S.final && S.final.winners.includes(name)) row.classList.add('win');
       board.append(row);
     });
+    const wn = $('waitNote'), w = S.waiting, others = w.filter((n) => n !== me);
+    if (w.length) {
+      wn.textContent = w.includes(me)
+        ? 'You join the next game.' + (others.length ? ' Also waiting: ' + others.join(', ') + '.' : '')
+        : others.join(', ') + (others.length > 1 ? ' join' : ' joins') + ' the next game.';
+      wn.classList.remove('hidden');
+    } else wn.classList.add('hidden');
     paintProgs();
   }
 
@@ -553,6 +639,7 @@
     if (!S) { $('board').textContent = ''; pane('st-wait'); $('waitTitle').textContent = 'Connecting'; $('waitSub').textContent = 'Finding the room.'; return; }
     if (S.phase !== 'round') progs = {};
     renderBoard();
+    renderTracker();
 
     // stage
     const ph = S.phase;
@@ -566,10 +653,11 @@
     } else if (ph === 'round' && R) {
       if (performance.now() < R.startLocal) pane('st-count'); else if (R.started) pane('st-live');
     } else if (ph === 'result' && S.result) { renderResult(); pane('st-result'); }
+    else if (ph === 'final' && S.final) { renderFinal(); pane('st-final'); }
     else if (ph === 'paused') {
       pane('st-paused');
-      $('pausedTitle').textContent = S.pausedWhy === 'idle' ? 'Paused, nobody was typing' : 'Paused';
-      $('pausedSub').textContent = S.pausedWhy === 'idle' ? 'Press Resume when you are both back.' : 'Take a breath. Resume whenever you are ready.';
+      $('pausedTitle').textContent = S.pausedWhy === 'idle' ? 'Paused, nobody was typing' : S.pausedWhy === 'host' ? 'The host changed' : 'Paused';
+      $('pausedSub').textContent = S.pausedWhy === 'idle' ? 'Press Resume when you are all back.' : S.pausedWhy === 'host' ? 'Your points are safe. Carrying on in a moment.' : 'Take a breath. Resume whenever you are ready.';
     }
 
     // controls
@@ -577,12 +665,23 @@
     $('modeNote').textContent = MODE_NOTE[S.settings.mode] + (S.settings.level === 'ramp' ? ' Words get harder as you go.' : '');
     const pb = $('pauseBtn');
     pb.classList.toggle('hidden', ph === 'paused');
-    pb.disabled = !(ph === 'round' || ph === 'result');
+    pb.disabled = !((ph === 'round' || ph === 'result') && S.match.round < S.match.total);
     pb.textContent = S.pauseNext ? 'Pausing after this round' : 'Pause';
-    const h = $('history'); h.textContent = '';
-    for (const w of S.history) { const i = document.createElement('i'); i.className = w === '-' ? 'n' : w === me ? 'w' : 'l'; i.title = w === '-' ? 'No winner' : w + ' won'; h.append(i); }
   }
 
+  function renderTracker() {
+    const m = S.match, ph = S.phase;
+    $('roundInfo').textContent = m.round > 0 ? (m.round >= m.total && ph !== 'final' ? 'Last round' : ph === 'final' ? 'Game over' : 'Round ' + m.round + ' of ' + m.total) : m.total + ' rounds, most points wins';
+    const d = $('dots'); d.textContent = '';
+    for (let i = 0; i < m.total; i++) {
+      const dot = document.createElement('i'), w = S.history[i];
+      if (i < S.history.length) { dot.className = w === '-' ? 'n' : w === me ? 'w' : 'l'; dot.title = w === '-' ? 'Round ' + (i + 1) + ': no winner' : 'Round ' + (i + 1) + ': ' + w; }
+      else if (ph === 'round' && i === m.round - 1) dot.className = 'cur';
+      d.append(dot);
+    }
+  }
+
+  const ordinal = (n) => { const v = n % 100, x = ['th', 'st', 'nd', 'rd']; return n + (x[(v - 20) % 10] || x[v] || x[0]); };
   let renderedResult = 0;
   function renderResult() {
     const res = S.result;
@@ -602,7 +701,7 @@
     for (const name of res.rank) {
       const per = res.per[name];
       const row = el('div', 'row' + (res.winner === name ? ' win' : ''));
-      row.append(el('div', 'rn', name + (name === me ? ' (you)' : '')));
+      row.append(el('div', 'rn', (per.place ? ordinal(per.place) + ' ' : '') + name + (name === me ? ' (you)' : '')));
       const big = el('div', 'rt');
       if (per.ok) big.textContent = fmt(per.ms); else if (per.text != null) { big.textContent = 'Wrong'; big.classList.add('bad'); } else { big.textContent = 'No answer'; big.classList.add('none'); }
       row.append(big);
@@ -618,20 +717,50 @@
         if (per.notes && per.notes.length) row.append(el('div', 'rm', per.notes.join(', ')));
       }
       if (per.prec != null) row.append(el('div', 'rm', Math.round(per.prec * 100) + '% accurate'));
+      const pt = el('div', 'rpts', '+' + per.pts.total + ' pts'); if (!per.pts.total) pt.classList.add('zero');
+      row.append(pt);
+      if (per.pts.total) row.append(el('div', 'rm', per.pts.place + ' for place' + (per.pts.clean ? ', ' + per.pts.clean + ' for a clean run' : '')));
       rows.append(row);
     }
     const nf = $('nextFill'); nf.style.transition = 'none'; nf.style.width = '0'; void nf.offsetWidth;
     nf.style.transition = 'width ' + (res.wait || RESULT_MS) + 'ms linear'; nf.style.width = '100%';
   }
 
+  function renderFinal() {
+    const f = S.final;
+    if (renderedFinal === f.id) return;
+    renderedFinal = f.id;
+    const t = $('finTitle'); t.className = 'restitle';
+    const win = f.winners;
+    const top = f.rank[0];
+    if (win.length > 1) { t.textContent = 'A tie at the top'; $('finWord').textContent = win.join(' and '); }
+    else if (win[0] === me) { t.textContent = 'You win the game'; t.classList.add('win'); $('finWord').textContent = top.points + ' points'; }
+    else { t.textContent = win[0] + ' wins the game'; t.classList.add('lose'); $('finWord').textContent = top.points + ' points'; }
+    $('finSub').textContent = 'Ranked by points, then round wins, accuracy and average time.';
+    const rows = $('finRows'); rows.textContent = '';
+    f.rank.forEach((r, i) => {
+      const row = el('div', 'frow' + (win.includes(r.name) ? ' win' : ''));
+      row.append(el('div', 'rank r' + (i + 1), String(i + 1)));
+      const mid = el('div', 'pmain');
+      mid.append(el('div', 'pname', r.name + (r.name === me ? ' (you)' : '')));
+      mid.append(el('div', 'rm', r.wins + (r.wins === 1 ? ' round win' : ' round wins') + ', ' + (r.acc != null ? Math.round(r.acc * 100) + '% accurate' : 'no accuracy') + ', ' + (r.avg != null ? fmt(r.avg) + ' average' : 'no average')));
+      const pts = el('div', 'wins'); pts.append(document.createTextNode(String(r.points)), el('span', 'ptsl', 'pts'));
+      row.append(mid, pts);
+      rows.append(row);
+    });
+    const nf = $('finFill'); nf.style.transition = 'none'; nf.style.width = '0'; void nf.offsetWidth;
+    nf.style.transition = 'width ' + (f.wait || FINAL_MS) + 'ms linear'; nf.style.width = '100%';
+  }
+
   /* ---------- buttons ---------- */
+  $('nextBtn').onclick = () => { Snd.init(); act({ t: 'next' }); };
   $('readyBtn').onclick = () => { Snd.init(); const mine = S && S.players[me]; act({ t: 'ready', v: !(mine && mine.ready) }); };
   $('resumeBtn').onclick = () => { Snd.init(); act({ t: 'resume' }); };
   $('pauseBtn').onclick = () => act({ t: 'pause' });
   $('resetBtn').onclick = () => {
     const b = $('resetBtn');
-    if (!resetArm) { resetArm = setTimeout(() => { resetArm = 0; b.textContent = 'Reset scores'; }, 3000); b.textContent = 'Tap again to reset'; return; }
-    clearTimeout(resetArm); resetArm = 0; b.textContent = 'Reset scores'; act({ t: 'reset' });
+    if (!resetArm) { resetArm = setTimeout(() => { resetArm = 0; b.textContent = 'Restart game'; }, 3000); b.textContent = 'Tap again to restart'; return; }
+    clearTimeout(resetArm); resetArm = 0; b.textContent = 'Restart game'; act({ t: 'reset' });
   };
   document.querySelectorAll('.seg button').forEach((b) => (b.onclick = () => act({ t: 'set', k: b.dataset.k, v: b.dataset.v })));
   $('soundBtn').onclick = () => { Snd.on = !Snd.on; store.set('sr-sound', Snd.on ? 'on' : 'off'); Snd.init(); render(); };

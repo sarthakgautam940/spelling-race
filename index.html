@@ -7,7 +7,7 @@
 <meta name="description" content="A private 1v1 spelling race. Spell it first, spell it right.">
 <meta name="theme-color" content="#ffffff">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%230b0b0b'/%3E%3Ccircle cx='46' cy='18' r='6' fill='%2322c55e'/%3E%3Cpath d='M20 44c0 4 4 6 9 6 6 0 9-3 9-7 0-10-17-6-17-15 0-4 3-7 9-7 5 0 8 2 9 6' fill='none' stroke='white' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="styles.css?v=3">
+<link rel="stylesheet" href="styles.css?v=4">
 </head>
 <body>
 <main id="app">
@@ -52,6 +52,10 @@
 
     <div class="board" id="board" aria-label="Leaderboard"></div>
 
+    <p id="waitNote" class="waitnote hidden"></p>
+
+    <div class="roundbar"><span id="roundInfo" class="rinfo"></span><div id="dots" class="dots" aria-label="Rounds"></div></div>
+
     <div class="stage" id="stage">
       <div id="st-wait" class="pane center">
         <h2 id="waitTitle">Waiting for your friend</h2>
@@ -60,7 +64,7 @@
 
       <div id="st-ready" class="pane center hidden">
         <h2>Everyone is here</h2>
-        <p class="muted">The race starts when all players press Ready. Others can still join later.</p>
+        <p class="muted">A game is 10 words. Most points wins. It starts when all players press Ready.</p>
         <button id="readyBtn" class="btn primary big" type="button">Ready</button>
       </div>
 
@@ -87,6 +91,15 @@
         <div class="nextbar"><div id="nextFill" class="nextfill"></div></div>
       </div>
 
+      <div id="st-final" class="pane center hidden">
+        <h2 id="finTitle" class="restitle"></h2>
+        <div id="finWord" class="resword"></div>
+        <p id="finSub" class="muted"></p>
+        <div id="finRows" class="frows"></div>
+        <div class="nextbar"><div id="finFill" class="nextfill"></div></div>
+        <button id="nextBtn" class="btn ghost" type="button">Start next game now</button>
+      </div>
+
       <div id="st-paused" class="pane center hidden">
         <h2 id="pausedTitle">Paused</h2>
         <p class="muted" id="pausedSub">Take a breath.</p>
@@ -110,18 +123,17 @@
       </div>
       <p id="modeNote" class="muted small"></p>
       <div class="ctl-row">
-        <div id="history" class="history" aria-label="Recent rounds"></div>
         <div class="ctl-btns">
           <button id="pauseBtn" class="chip btn-chip" type="button">Pause</button>
-          <button id="resetBtn" class="chip btn-chip" type="button">Reset scores</button>
+          <button id="resetBtn" class="chip btn-chip" type="button">Restart game</button>
         </div>
       </div>
     </div>
   </section>
 
 </main>
-<script src="engine.js?v=3" defer></script>
-<script src="net.js?v=3" defer></script>
-<script src="app.js?v=3" defer></script>
+<script src="engine.js?v=4" defer></script>
+<script src="net.js?v=4" defer></script>
+<script src="app.js?v=4" defer></script>
 </body>
 </html>

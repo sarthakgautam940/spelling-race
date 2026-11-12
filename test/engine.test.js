@@ -55,14 +55,29 @@ test('level weights sum to one and shift toward hard', () => {
   assert.deepStrictEqual(E.levelWeights('hard', 3), { easy: 0, medium: 0, hard: 1 });
 });
 
-test('rank orders by wins, then accuracy, then speed', () => {
-  const P = (name, wins, precSum, precN, msSum, correct) => ({ name, wins, precSum, precN, msSum, correct });
+test('round points reward place and clean play', () => {
+  assert.deepStrictEqual(E.roundPoints(0, true, 1), { place: 10, clean: 2, total: 12 });
+  assert.deepStrictEqual(E.roundPoints(1, true, 0.8), { place: 7, clean: 0, total: 7 });
+  assert.strictEqual(E.roundPoints(2, true, 1).total, 7);
+  assert.strictEqual(E.roundPoints(9, true, 1).place, 1);
+  assert.deepStrictEqual(E.roundPoints(0, false, 1), { place: 0, clean: 0, total: 0 });
+});
+
+test('rank orders by points, then wins, accuracy, average and best time', () => {
+  const P = (name, points, wins, precSum, precN, msSum, correct, bestMs) => ({ name, points, wins, precSum, precN, msSum, correct, bestMs });
   const out = E.rank([
-    P('c', 1, 1, 1, 900, 1),
-    P('a', 3, 2, 3, 3000, 3),
-    P('b', 1, 1, 1, 500, 1),
-    P('d', 1, 0.5, 1, 100, 1),
-    P('e', 0, 0, 0, 0, 0)
+    P('slow', 50, 2, 3, 3, 9000, 3, 2500),
+    P('top', 80, 4, 4, 5, 8000, 5, 1000),
+    P('wins', 50, 3, 3, 3, 9000, 3, 2500),
+    P('acc', 50, 2, 3, 3, 9000, 3, 2500),
+    P('tidy', 50, 2, 2.5, 3, 4000, 3, 900),
+    P('none', 0, 0, 0, 0, 0, 0, null)
   ]).map((p) => p.name);
-  assert.deepStrictEqual(out, ['a', 'b', 'c', 'd', 'e']);
+  assert.deepStrictEqual(out, ['top', 'wins', 'acc', 'slow', 'tidy', 'none']);
+});
+
+test('average time breaks an otherwise equal tie', () => {
+  const P = (name, ms) => ({ name, points: 40, wins: 2, precSum: 4, precN: 4, msSum: ms * 4, correct: 4, bestMs: 1000 });
+  assert.deepStrictEqual(E.rank([P('b', 2000), P('a', 1500)]).map((p) => p.name), ['a', 'b']);
+  assert.strictEqual(E.compare(P('x', 1000), P('y', 1000)), 0);
 });
